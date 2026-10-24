@@ -252,8 +252,12 @@ class Brain:
         max_retries: int = DEFAULT_MAX_RETRIES,
         agent: str = "",
         task: str = "",
+        model: str = "",
     ) -> str:
         """Send a prompt to the configured provider and return the response.
+
+        model: use this Claude model for this call instead of brain.model
+        (e.g. a fast one for easy decisions). Codex always uses brain.model.
 
         Retries transient failures with exponential backoff and enforces a
         hard timeout so a hung CLI call can never stall the heartbeat.
@@ -283,7 +287,7 @@ class Brain:
 
         # The prompt always travels on stdin: argv is visible to other local
         # users, Windows caps it at ~32k chars, and .cmd shims re-parse it.
-        cmd = claude_runtime.build_command(executable, self.model, session_id)
+        cmd = claude_runtime.build_command(executable, model or self.model, session_id)
 
         logger.debug(f"Brain call (session={session_id}): {prompt[:100]}...")
 
@@ -578,6 +582,7 @@ class Brain:
         session_id: str | None = None,
         agent: str = "",
         task: str = "",
+        model: str = "",
     ) -> dict | list | None:
         """Send a prompt and parse the response as JSON."""
         full_prompt = (
@@ -585,7 +590,7 @@ class Brain:
             + "\n\nRespond ONLY with valid JSON. No markdown, no explanation."
         )
         response = await self.think(
-            full_prompt, session_id=session_id, agent=agent, task=task
+            full_prompt, session_id=session_id, agent=agent, task=task, model=model
         )
         self.last_reply_empty = not response
         if not response:
@@ -719,6 +724,7 @@ class Brain:
             "handler": ["objection_handling", "sales_methodology", "offer_strategy", "product_knowledge", "competitive_intel"],
             "sender": ["email_frameworks", "product_knowledge"],
             "linkedin": ["linkedin_outreach", "prospecting_tactics", "product_knowledge"],
+            "whatsapp": ["whatsapp_outreach", "signal_playbook", "product_knowledge"],
         }
 
         skill_names = skill_map.get(agent_name, [])

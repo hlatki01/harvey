@@ -5,6 +5,7 @@ is collected until a human confirms, and a confirmed set becomes a cohort
 query rather than a static list.
 """
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -251,10 +252,12 @@ def test_today_stats_are_present_even_on_an_empty_install(client):
 
 
 def test_dashboard_serves_its_files(client):
-    assert client.get("/").status_code == 200
-    assert "app.css" in client.get("/").text
-    assert client.get("/static/app.css").status_code == 200
-    assert client.get("/static/app.js").status_code == 200
+    page = client.get("/")
+    assert page.status_code == 200
+    assets = re.findall(r'(?:src|href)="(/static/assets/[^"]+)"', page.text)
+    assert any(a.endswith(".css") for a in assets) and any(a.endswith(".js") for a in assets)
+    for asset in assets:
+        assert client.get(asset).status_code == 200
 
 
 @pytest.mark.parametrize("filename, url, media_type", [
@@ -396,59 +399,6 @@ def test_cohort_csv_requires_authorization(client):
     assert response.status_code == 401
 
 
-def test_cohort_browser_export_uses_auth_and_handles_failures():
-    import json
-    import shutil
-    import subprocess
-    node = shutil.which('node')
-    if not node:
-        pytest.skip('node unavailable')
-    web = Path(__file__).resolve().parent.parent / 'harvey' / 'web'
-    script = r'''
-const fs = require('fs'), vm = require('vm');
-const calls = [], revoked = [], links = [];
-global.window = {location: {origin: 'http://127.0.0.1:5555', hash: ''}};
-global.sessionStorage = {getItem: () => 'T'.repeat(43)};
-global.document = {body: {appendChild: x => links.push(x)}, createElement: () =>
-  ({click() {this.clicked = true;}, remove() {this.removed = true;}})};
-global.setTimeout = fn => fn();
-const locks = [];
-global.showLock = reason => locks.push(reason);
-global.hideLock = () => {};
-URL.createObjectURL = () => 'blob:local';
-URL.revokeObjectURL = url => revoked.push(url);
-let ok = true, status = 200;
-global.fetch = async (url, opts) => {calls.push({url, auth: opts.headers.get('Authorization'),
-  redirect: opts.redirect}); return {ok, status, blob: async () => ({})};};
-vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
-const app = fs.readFileSync(process.argv[2], 'utf8');
-vm.runInThisContext('let _locked = false;' + app.slice(app.indexOf('async function lockIfRefused('), app.indexOf('function showLock(')));
-vm.runInThisContext("const _cohort = {require: new Set(['A']), exclude: new Set(['B'])};" +
- app.slice(app.indexOf('async function exportCohort('), app.indexOf('function pageCohort(')));
-(async () => {
- const button = {};
- await exportCohort(button);
- const success = {...button};
- ok = false; status = 500;
- await exportCohort(button);
- const failure = {...button};
- status = 401;
- await exportCohort(button);
- console.log(JSON.stringify({calls, revoked, links, success, failure, locks, refused: button}));
-})().catch(e => {console.error(e); process.exit(1);});
-'''
-    result = subprocess.run([node, '-e', script, str(web / 'auth.js'), str(web / 'app.js')],
-                            text=True, encoding="utf-8", capture_output=True, check=True)
-    data = json.loads(result.stdout)
-    assert all(c['auth'] == 'Bearer ' + 'T' * 43 and c['redirect'] == 'error' for c in data['calls'])
-    assert data['calls'][0]['url'] == 'http://127.0.0.1:5555/api/cohort.csv?require=A&exclude=B'
-    assert len(data['links']) == 1
-    assert data['links'][0]['clicked'] and data['links'][0]['removed']
-    assert data['revoked'] == ['blob:local']
-    assert data['success'] == {'disabled': False, 'textContent': 'Export CSV'}
-    assert data['failure'] == {'disabled': False, 'textContent': 'Export failed — retry'}
-    assert data['refused'] == data['failure']
-    assert len(data['locks']) == 1 and 'saved token was not accepted' in data['locks'][0]
 
 
 def test_cohort_csv_invalid_codes_are_client_error(client):
@@ -458,48 +408,36 @@ def test_cohort_csv_invalid_codes_are_client_error(client):
     assert response.status_code == 400
 
 
-def test_cohort_browser_ignores_superseded_pages_and_cleared_filters():
-    import json
-    import shutil
+
+
+def test_first_requests_on_a_new_database_do_not_race_the_migrations(tmp_path):
+    """The browser fires a dozen reads at once on a fresh install; each one calls
+    init_db, and two of them migrating together used to fail with a duplicate
+    column error."""
+    import asyncio
+
+    import harvey.state as state_mod
+
+    db = str(tmp_path / "fresh.db")
+    state_mod._MIGRATED.discard(db)
+
+    async def many():
+        return await asyncio.gather(
+            *(StateManager(db).init_db() for _ in range(12)), return_exceptions=True)
+
+    assert [r for r in asyncio.run(many()) if r is not None] == []
+
+
+def test_two_processes_starting_on_a_new_database_both_migrate(tmp_path):
+    """`harvey run` and `harvey dashboard` can start together on a fresh install."""
     import subprocess
-    node = shutil.which('node')
-    if not node:
-        pytest.skip('node unavailable')
-    app = Path(__file__).resolve().parent.parent / 'harvey' / 'web' / 'app.js'
-    script = r'''
-const fs = require('fs'), vm = require('vm');
-const app = fs.readFileSync(process.argv[1], 'utf8');
-const el = {innerHTML: 'previous export button'}, pending = [];
-global.document = {getElementById: () => el};
-global.api = (path, opts) => new Promise(resolve => pending.push({resolve, body: JSON.parse(opts.body)}));
-global.escHtml = s => s || '';
-vm.runInThisContext("const _cohort = {require: new Set(['A']), exclude: new Set()};" +
- "let _cohortOffset = 0, _cohortGeneration = 0; const COHORT_PAGE = 50;" +
- app.slice(app.indexOf('async function runCohort('), app.indexOf('async function exportCohort(')));
-const page = (name, offset) => ({size: 100, offset, companies: [{name}]});
-(async () => {
- const first = runCohort();
- const loading = el.innerHTML;
- vm.runInThisContext('_cohortOffset = 50');
- const second = runCohort();
- pending[1].resolve(page('LATEST', 50)); await second;
- const latest = el.innerHTML;
- pending[0].resolve(page('STALE', 0)); await first;
- const afterOld = el.innerHTML;
- const third = runCohort();
- vm.runInThisContext('_cohort.require.clear()');
- await runCohort();
- const cleared = el.innerHTML;
- pending[2].resolve(page('STALE_AFTER_CLEAR', 50)); await third;
- console.log(JSON.stringify({loading, latest, afterOld, cleared, afterClear: el.innerHTML,
-   offsets: pending.map(x => x.body.offset)}));
-})().catch(e => {console.error(e); process.exit(1);});
-'''
-    response = subprocess.run([node, '-e', script, str(app)], text=True, encoding="utf-8",
-                              capture_output=True, check=True)
-    data = json.loads(response.stdout)
-    assert data['offsets'] == [0, 50, 50]
-    assert 'Loading cohort' in data['loading'] and 'Export CSV' not in data['loading']
-    assert 'LATEST' in data['latest'] and 'STALE' not in data['latest']
-    assert data['afterOld'] == data['latest']
-    assert data['cleared'] == data['afterClear'] == ''
+    import sys
+
+    db = str(tmp_path / "fresh.db")
+    code = ("import asyncio, sys; from harvey.state import StateManager; "
+            "asyncio.run(StateManager(sys.argv[1]).init_db())")
+    root = Path(__file__).resolve().parent.parent
+    procs = [subprocess.Popen([sys.executable, "-c", code, db], cwd=root,
+                              stderr=subprocess.PIPE, text=True) for _ in range(6)]
+    results = [(p.wait(timeout=60), p.stderr.read()) for p in procs]
+    assert [r for r in results if r[0] != 0] == []

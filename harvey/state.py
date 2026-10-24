@@ -9,6 +9,7 @@ list tracked with SQLite's ``PRAGMA user_version`` so existing user DBs
 upgrade cleanly in place.
 """
 
+import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
@@ -28,6 +29,11 @@ DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
 
 # How long (seconds) a connection waits on a locked database before failing.
 BUSY_TIMEOUT_SECONDS = 30.0
+_MIGRATED: set[str] = set()  # db files this process has already brought to the latest schema
+# One migration at a time per file and event loop: on a brand-new database the
+# dashboard's first requests arrive together, and two of them both seeing
+# user_version 0 would each run the same ALTERs ("duplicate column name").
+_MIGRATING: dict[tuple[str, int], asyncio.Lock] = {}
 
 # Email statuses the Writer drafts for. Shared with the heartbeat so it only
 # chooses write_campaign when there is something the Writer will act on.
@@ -435,6 +441,66 @@ MIGRATIONS: list[str] = [
     -- so one subscription's budget never consumes the other's.
     ALTER TABLE usage_log ADD COLUMN codex_calls INTEGER DEFAULT 0;
     """,
+    # ── v12: outbox rows carry the channel they go out on ──
+    """
+    -- 'email' | 'whatsapp'. Every row before this migration is email. For a
+    -- whatsapp row, to_email holds the recipient's phone in international
+    -- digits and subject is the fixed label 'WhatsApp'; the columns keep
+    -- their names so the email path and its history are untouched.
+    ALTER TABLE outbox ADD COLUMN channel TEXT DEFAULT 'email';
+    CREATE INDEX IF NOT EXISTS idx_outbox_channel_status ON outbox(channel, status);
+    CREATE INDEX IF NOT EXISTS idx_prospects_phone ON prospects(phone) WHERE phone != '';
+    """,
+    # ── v13: lessons Harvey proposes from corrections; a human approves ──
+    """
+    CREATE TABLE IF NOT EXISTS lessons (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'proposed',   -- proposed | approved | rejected
+        evidence TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
+    # ── v14: notifications: what needs attention, with mute/archive/delete ──
+    """
+    CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL UNIQUE,          -- what it is about: one row per thing, not per event
+        title TEXT NOT NULL,
+        detail TEXT DEFAULT '',
+        tone TEXT DEFAULT 'warn',          -- bad | warn | good
+        tab TEXT DEFAULT '',               -- where "open" goes
+        target TEXT DEFAULT '',            -- e.g. a conversation id
+        signature TEXT DEFAULT '',         -- changes when there is something new to see
+        status TEXT NOT NULL DEFAULT 'new',   -- new | read | archived | muted
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
+    # ── v15: dashboard users (admin | operator), invites and login sessions ──
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT DEFAULT '',
+        role TEXT NOT NULL DEFAULT 'operator',      -- admin | operator
+        status TEXT NOT NULL DEFAULT 'invited',     -- invited | active | disabled
+        password_hash TEXT DEFAULT '',
+        invite_hash TEXT DEFAULT '',                -- sha256 of the emailed token
+        invite_expires TEXT DEFAULT '',
+        invited_by TEXT DEFAULT '',
+        last_login TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_invite ON users(invite_hash) WHERE invite_hash != '';
+    CREATE TABLE IF NOT EXISTS sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -482,22 +548,43 @@ class StateManager:
             await db.close()
 
     async def init_db(self):
-        """Create/upgrade the schema. Safe to call on every startup."""
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        async with self._connect() as db:
-            # WAL is persistent in the DB file: readers (dashboard) never
-            # block the writer (agent) and vice versa.
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA synchronous=NORMAL")
+        """Create/upgrade the schema. Safe to call on every startup; once per process per file
+        (the dashboard calls it on every request and each call is a connection plus PRAGMAs)."""
+        def migrated() -> bool:
+            return self.db_path in _MIGRATED and Path(self.db_path).exists()
 
-            async with db.execute("PRAGMA user_version") as cursor:
-                (version,) = await cursor.fetchone()
+        if migrated():
+            return
+        lock = _MIGRATING.setdefault((self.db_path, id(asyncio.get_running_loop())), asyncio.Lock())
+        async with lock:
+            if migrated():
+                return
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            # `harvey run` and `harvey dashboard` can start together on a new file, and a
+            # migration script is several autocommitted statements: two processes
+            # interleaving them each trip over the other's ALTER and neither finishes.
+            # SQLite's own file lock on a sidecar database makes the upgrade one-at-a-time
+            # across processes (on any OS), waiting up to the busy timeout.
+            async with aiosqlite.connect(self.db_path + ".migrate", timeout=BUSY_TIMEOUT_SECONDS,
+                                         isolation_level=None) as gate:
+                await gate.execute("BEGIN EXCLUSIVE")
+                async with self._connect() as db:
+                    # WAL is persistent in the DB file: readers (dashboard) never
+                    # block the writer (agent) and vice versa.
+                    await db.execute("PRAGMA journal_mode=WAL")
+                    await db.execute("PRAGMA synchronous=NORMAL")
 
-            for target, script in enumerate(MIGRATIONS, start=1):
-                if version < target:
-                    await db.executescript(script)
-                    await db.execute(f"PRAGMA user_version = {target}")
-                    await db.commit()
+                    # Read inside the gate: the winner may have finished while we waited.
+                    async with db.execute("PRAGMA user_version") as cursor:
+                        (version,) = await cursor.fetchone()
+
+                    for target, script in enumerate(MIGRATIONS, start=1):
+                        if version < target:
+                            await db.executescript(script)
+                            await db.execute(f"PRAGMA user_version = {target}")
+                            await db.commit()
+                await gate.execute("COMMIT")
+            _MIGRATED.add(self.db_path)
 
     # ── Companies ──
 
@@ -748,6 +835,27 @@ class StateManager:
             )
             await db.commit()
 
+    async def get_whatsapp_sent_kinds(self) -> dict[str, str]:
+        """{message id: "team" for what the team sent from the dashboard,
+        else the outbox kind} for every WhatsApp message Harvey sent (from the
+        action log, which outlives the leads and outbox rows it describes)."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT json_extract(details_json, '$.message_id'), "
+                "COALESCE(json_extract(details_json, '$.kind'), '') FROM actions "
+                "WHERE action_type = 'whatsapp_sent'") as cur:
+                return {r[0]: r[1] for r in await cur.fetchall() if r[0]}
+
+    async def get_whatsapp_sent_ids(self) -> set[str]:
+        return set(await self.get_whatsapp_sent_kinds())
+
+    async def set_prospect_industry(self, prospect_id: str, industry: str):
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE prospects SET industry = ?, updated_at = ? WHERE id = ?",
+                (industry, _utcnow().isoformat(), prospect_id))
+            await db.commit()
+
     async def queue_prospect_if_unsent(self, prospect_id: str) -> bool:
         """Mark a prospect 'queued' unless something moved them on meanwhile.
 
@@ -772,6 +880,19 @@ class StateManager:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM prospects WHERE email = ?", (email,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return self._prospect_from_row(row) if row else None
+
+    async def get_prospect_by_phone(self, phone: str) -> Prospect | None:
+        """Look up a prospect by phone, as international digits."""
+        phone = (phone or "").strip()
+        if not phone:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM prospects WHERE phone = ?", (phone,)
             ) as cursor:
                 row = await cursor.fetchone()
                 return self._prospect_from_row(row) if row else None
@@ -865,8 +986,9 @@ class StateManager:
         provider: str = "",
         thread_ref: str = "",
         in_reply_to: str = "",
+        channel: str = "email",
     ) -> str | None:
-        """Queue one outgoing email. Returns its id, or None when the
+        """Queue one outgoing message (email, or WhatsApp with channel=). Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard."""
         item_id = _new_id()
         async with self._connect() as db:
@@ -874,12 +996,12 @@ class StateManager:
                 """INSERT OR IGNORE INTO outbox
                    (id, campaign_id, prospect_id, conversation_id, step, kind,
                     to_email, subject, body, status, send_at, provider,
-                    thread_ref, in_reply_to)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    thread_ref, in_reply_to, channel)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item_id, campaign_id, prospect_id, conversation_id,
                     int(step), kind, _norm(to_email), subject, body,
-                    status, send_at, provider, thread_ref, in_reply_to,
+                    status, send_at, provider, thread_ref, in_reply_to, channel,
                 ),
             )
             await db.commit()
@@ -892,10 +1014,15 @@ class StateManager:
         limit: int = 200,
         exclude_kind: str | None = None,
         skip_unready_follow_ups: bool = False,
+        channel: str | None = None,
     ) -> list[dict]:
         """skip_unready_follow_ups: leave out sequence follow-ups whose
-        previous step hasn't gone out yet, so they can't fill the page."""
+        previous step hasn't gone out yet, so they can't fill the page.
+        channel: only that channel's rows (each sender drains its own)."""
         where, params = [], []
+        if channel:
+            where.append("COALESCE(channel, 'email') = ?")
+            params.append(channel)
         if status:
             where.append("status = ?")
             params.append(status)
@@ -1116,9 +1243,10 @@ class StateManager:
                 return (await cursor.fetchone())[0]
 
     async def count_outbox_sent_today(self, kind: str | None = None,
-                                      since: str | None = None) -> int:
-        """Emails sent today (the UTC day, or since `since`, a naive UTC
-        ISO time); only one kind ("sequence", "reply") if given."""
+                                      since: str | None = None,
+                                      channel: str | None = None) -> int:
+        """Messages sent today (the UTC day, or since `since`, a naive UTC
+        ISO time); only one kind ("sequence", "reply") or channel if given."""
         if since:
             sql = "SELECT COUNT(*) FROM outbox WHERE status = 'sent' AND sent_at >= ?"
             params: tuple = (since,)
@@ -1129,9 +1257,23 @@ class StateManager:
         if kind:
             sql += " AND kind = ?"
             params += (kind,)
+        if channel:
+            sql += " AND COALESCE(channel, 'email') = ?"
+            params += (channel,)
         async with self._connect() as db:
             async with db.execute(sql, params) as cursor:
                 return (await cursor.fetchone())[0]
+
+    async def has_outbox_for_prospect(self, prospect_id: str, channel: str) -> bool:
+        """Whether anything was ever queued for this person on this channel
+        (the one-opening-message guard for senders with no campaign slot)."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM outbox WHERE prospect_id = ? "
+                "AND COALESCE(channel, 'email') = ? LIMIT 1",
+                (prospect_id, channel),
+            ) as cursor:
+                return await cursor.fetchone() is not None
 
     async def get_step_delay_days(self, campaign_id: str, step: int) -> int | None:
         """The campaign's planned wait before `step` (days after the step
@@ -1359,6 +1501,47 @@ class StateManager:
         SELECT * FROM latest WHERE value_num IS NULL OR value_num != 0
     )
     """
+
+    async def company_signal_codes(self, company_id: str) -> list[str]:
+        """The signals a company currently carries (latest observation each)."""
+        async with self._connect() as db:
+            async with db.execute(
+                self._CURRENT_CTE
+                + "SELECT DISTINCT signal_code FROM positive WHERE company_id = ? "
+                "ORDER BY signal_code", (company_id,),
+            ) as cursor:
+                return [row[0] for row in await cursor.fetchall()]
+
+    async def get_whatsapp_candidates(
+        self, require: list[str], exclude: list[str], limit: int,
+    ) -> list[Company]:
+        """Companies with a phone that haven't been tried on WhatsApp yet.
+
+        'Tried' means a company_phone prospect exists for them, whatever its
+        outcome (messaged, no WhatsApp, draft failed), so none is retried
+        forever. `require`/`exclude` narrow by confirmed signal, as a cohort.
+        """
+        sql = self._CURRENT_CTE + (
+            "SELECT c.* FROM companies c WHERE c.phone != '' "
+            "AND NOT EXISTS (SELECT 1 FROM prospects p WHERE p.company_id = c.id "
+            "AND p.source = 'company_phone')"
+        )
+        params: list = []
+        if require:
+            ph = ",".join("?" for _ in require)
+            sql += (f" AND c.id IN (SELECT company_id FROM positive WHERE signal_code IN ({ph}) "
+                    "GROUP BY company_id HAVING COUNT(DISTINCT signal_code) = ?)")
+            params += [*require, len(set(require))]
+        if exclude:
+            ph = ",".join("?" for _ in exclude)
+            sql += f" AND c.id NOT IN (SELECT company_id FROM positive WHERE signal_code IN ({ph}))"
+            params += list(exclude)
+        sql += " ORDER BY c.created_at ASC LIMIT ?"
+        params.append(int(limit))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cursor:
+                return [self._company_from_row(r) for r in await cursor.fetchall()]
 
     async def signal_counts(self) -> list[dict]:
         """How many entities actually carry each signal — the cohort sizes."""
@@ -1638,6 +1821,234 @@ class StateManager:
         except (json.JSONDecodeError, TypeError):
             return []
         return [l for l in known if isinstance(l, str)] if isinstance(known, list) else []
+
+    # ── Lessons ──
+
+    async def add_lesson(self, text: str, evidence: str = "") -> bool:
+        """Store a proposed lesson; False if the same text already exists."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO lessons (id, text, evidence) VALUES (?, ?, ?)",
+                (_new_id(), text.strip(), evidence))
+            await db.commit()
+            return cursor.rowcount == 1
+
+    # ── Notifications: what needs attention, one row per thing ──
+
+    async def sync_notifications(self, items: list[tuple]) -> None:
+        """Raise or refresh every (key, title, detail, tone, tab, target, signature) in one
+        transaction, and drop unread/read ones whose cause is gone (archived and muted stay).
+        A new signature (something new happened) makes a read one unread again. One commit,
+        and none when nothing changed: each commit is an fsync other writers queue behind."""
+        now = _utcnow().isoformat()
+        keys = {it[0] for it in items}
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT id, key, status, signature, title, detail, tone, tab, target "
+                                  "FROM notifications") as cur:
+                have = {r["key"]: r for r in await cur.fetchall()}
+            for key, title, detail, tone, tab, target, signature in items:
+                row = have.get(key)
+                if row is None:
+                    await db.execute(
+                        "INSERT INTO notifications (id, key, title, detail, tone, tab, target, signature, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                        "title = excluded.title, detail = excluded.detail, tone = excluded.tone, "
+                        "tab = excluded.tab, target = excluded.target, signature = excluded.signature",
+                        (_new_id(), key, title, detail, tone, tab, target, signature, now, now))
+                elif (row["title"], row["detail"], row["tone"], row["tab"], row["target"], row["signature"])                         != (title, detail, tone, tab, target, signature):
+                    status = "new" if row["status"] == "read" and row["signature"] != signature else row["status"]
+                    await db.execute(
+                        "UPDATE notifications SET title = ?, detail = ?, tone = ?, tab = ?, target = ?, "
+                        "signature = ?, status = ?, updated_at = CASE WHEN signature != ? THEN ? ELSE updated_at END "
+                        "WHERE id = ?", (title, detail, tone, tab, target, signature, status, signature, now, row["id"]))
+            for key, row in have.items():
+                if key not in keys and row["status"] in ("new", "read"):
+                    await db.execute("DELETE FROM notifications WHERE id = ?", (row["id"],))
+            if db.total_changes:
+                await db.commit()
+
+    async def get_notifications(self, view: str = "inbox") -> list[dict]:
+        statuses = {"inbox": ("new", "read"), "archived": ("archived",), "muted": ("muted",)}.get(view, ("new", "read"))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM notifications WHERE status IN ({','.join('?' * len(statuses))}) "
+                "ORDER BY (status = 'new') DESC, updated_at DESC LIMIT 100", statuses) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def count_unread_notifications(self) -> int:
+        async with self._connect() as db:
+            async with db.execute("SELECT COUNT(*) FROM notifications WHERE status = 'new'") as cur:
+                return (await cur.fetchone())[0]
+
+    async def set_notification_status(self, nid: str, status: str) -> int:
+        async with self._connect() as db:
+            cursor = await db.execute("UPDATE notifications SET status = ? WHERE id = ?", (status, nid))
+            await db.commit()
+            return cursor.rowcount
+
+    async def mark_all_notifications_read(self) -> None:
+        async with self._connect() as db:
+            await db.execute("UPDATE notifications SET status = 'read' WHERE status = 'new'")
+            await db.commit()
+
+    async def delete_notification(self, nid: str) -> int:
+        async with self._connect() as db:
+            cursor = await db.execute("DELETE FROM notifications WHERE id = ?", (nid,))
+            await db.commit()
+            return cursor.rowcount
+
+    # ── Dashboard users, invites and sessions ──
+
+    async def _user_rows(self, sql: str, args: tuple = ()) -> list[dict]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, args) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def list_users(self) -> list[dict]:
+        return await self._user_rows(
+            "SELECT id, email, name, role, status, last_login, created_at, invite_expires "
+            "FROM users ORDER BY created_at, rowid")
+
+    async def get_user(self, user_id: str) -> dict | None:
+        rows = await self._user_rows("SELECT * FROM users WHERE id = ?", (user_id,))
+        return rows[0] if rows else None
+
+    async def get_user_by_email(self, email: str) -> dict | None:
+        rows = await self._user_rows("SELECT * FROM users WHERE email = ?", (email.strip().lower(),))
+        return rows[0] if rows else None
+
+    async def get_user_by_invite(self, invite_hash: str) -> dict | None:
+        """The invited user this token belongs to, if it is unused and unexpired."""
+        if not invite_hash:
+            return None
+        rows = await self._user_rows(
+            "SELECT * FROM users WHERE invite_hash = ? AND status = 'invited' AND invite_expires > ?",
+            (invite_hash, _utcnow().isoformat()))
+        return rows[0] if rows else None
+
+    async def save_invite(self, email: str, name: str, role: str, invite_hash: str,
+                          expires: str, invited_by: str = "") -> str:
+        """Create the invited user, or refresh the invite of one still pending."""
+        email = email.strip().lower()
+        existing = await self.get_user_by_email(email)
+        async with self._connect() as db:
+            if existing is None:
+                uid = _new_id()
+                await db.execute(
+                    "INSERT INTO users (id, email, name, role, status, invite_hash, invite_expires, invited_by) "
+                    "VALUES (?, ?, ?, ?, 'invited', ?, ?, ?)",
+                    (uid, email, name, role, invite_hash, expires, invited_by))
+            else:
+                uid = existing["id"]
+                await db.execute(
+                    "UPDATE users SET name = ?, role = ?, invite_hash = ?, invite_expires = ? WHERE id = ?",
+                    (name or existing["name"], role, invite_hash, expires, uid))
+            await db.commit()
+        return uid
+
+    async def activate_user(self, user_id: str, password_hash: str, name: str = "") -> None:
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE users SET password_hash = ?, status = 'active', invite_hash = '', "
+                "invite_expires = '', name = CASE WHEN ? != '' THEN ? ELSE name END WHERE id = ?",
+                (password_hash, name, name, user_id))
+            await db.commit()
+
+    async def set_user_role(self, user_id: str, role: str) -> int:
+        async with self._connect() as db:
+            cur = await db.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+            await db.commit()
+            return cur.rowcount
+
+    async def set_user_status(self, user_id: str, status: str) -> int:
+        """active | disabled (only for someone who has set a password).
+        Disabling ends every session of that user."""
+        async with self._connect() as db:
+            cur = await db.execute(
+                "UPDATE users SET status = ? WHERE id = ? AND password_hash != ''", (status, user_id))
+            if status == "disabled":
+                await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            await db.commit()
+            return cur.rowcount
+
+    async def delete_user(self, user_id: str) -> int:
+        async with self._connect() as db:
+            await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            cur = await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            await db.commit()
+            return cur.rowcount
+
+    async def touch_login(self, user_id: str) -> None:
+        async with self._connect() as db:
+            await db.execute("UPDATE users SET last_login = ? WHERE id = ?",
+                             (_utcnow().isoformat(), user_id))
+            await db.commit()
+
+    async def create_session(self, token_hash: str, user_id: str, expires: str) -> None:
+        async with self._connect() as db:
+            await db.execute("DELETE FROM sessions WHERE expires_at < ?", (_utcnow().isoformat(),))
+            await db.execute("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+                             (token_hash, user_id, expires))
+            await db.commit()
+
+    async def get_session_user(self, token_hash: str) -> dict | None:
+        """The active user behind a live session, or None."""
+        rows = await self._user_rows(
+            "SELECT u.id, u.email, u.name, u.role FROM sessions s JOIN users u ON u.id = s.user_id "
+            "WHERE s.token_hash = ? AND s.expires_at > ? AND u.status = 'active'",
+            (token_hash, _utcnow().isoformat()))
+        return rows[0] if rows else None
+
+    async def delete_session(self, token_hash: str) -> None:
+        async with self._connect() as db:
+            await db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+            await db.commit()
+
+    async def get_lessons(self, status: str | None = None) -> list[dict]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            sql = "SELECT * FROM lessons" + (" WHERE status = ?" if status else "")
+            async with db.execute(sql + " ORDER BY created_at, rowid",
+                                  (status,) if status else ()) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def set_lesson_status(self, lesson_id: str, status: str) -> int:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "UPDATE lessons SET status = ? WHERE id = ?", (status, lesson_id))
+            await db.commit()
+            return cursor.rowcount
+
+    async def get_corrections(self, since: str) -> list[dict]:
+        """What a person changed in Harvey's drafts (any channel) since `since`
+        ("YYYY-MM-DD HH:MM:SS"): drafts rejected, and drafts edited (old text
+        from the action log). Each: kind, channel, before, after."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT 'rejected' AS kind, COALESCE(channel, 'email') AS channel, "
+                "body AS before, '' AS after FROM outbox WHERE status = 'rejected' "
+                "AND replace(updated_at, 'T', ' ') > ?", (since,)) as cur:
+                out = [dict(r) for r in await cur.fetchall()]
+            async with db.execute(
+                "SELECT a.details_json, COALESCE(o.channel, 'email') AS channel, o.body AS after "
+                "FROM actions a JOIN outbox o ON o.id = json_extract(a.details_json, '$.outbox_id') "
+                "WHERE a.action_type = 'outbox_edited' AND a.created_at > ?", (since,)) as cur:
+                for r in await cur.fetchall():
+                    out.append({"kind": "edited", "channel": r["channel"], "after": r["after"],
+                                "before": json.loads(r["details_json"]).get("old_body", "")})
+            return out
+
+    async def lessons_block(self) -> str:
+        """Approved lessons as a prompt section, or "" when there are none."""
+        lessons = await self.get_lessons("approved")
+        if not lessons:
+            return ""
+        return ("\n\n---\n## LESSONS FROM PAST CORRECTIONS (approved by the team)\n"
+                + "\n".join(f"- {l['text']}" for l in lessons))
 
     async def get_setting(self, key: str, default: str = "") -> str:
         async with self._connect() as db:

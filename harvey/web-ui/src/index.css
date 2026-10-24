@@ -1,0 +1,167 @@
+@import 'tailwindcss';
+
+
+
+/* Fonts are vendored (public/fonts): the dashboard renders with the network off. */
+@font-face {
+  font-family: 'Geist'; font-style: normal; font-weight: 400 600;
+  font-display: swap; src: url('/static/fonts/geist.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Geist Mono'; font-style: normal; font-weight: 400 500;
+  font-display: swap; src: url('/static/fonts/geist-mono.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Newsreader'; font-style: normal; font-weight: 400 600;
+  font-display: swap; src: url('/static/fonts/newsreader.woff2') format('woff2');
+}
+
+/* One accent (cobalt) for the primary action and the current page. Status hues
+   appear only on status, so colour always means something. Light and dark are
+   the same design re-tokenised; "auto" follows the OS until a theme is chosen. */
+:root {
+  --bg: #F6F6F7; --surface: #FFFFFF; --surface-2: #F3F3F4; --surface-3: #EBEBED;
+  --line: #E7E7EA; --line-strong: #D6D6DB;
+  --text: #111113; --text-2: #5B5B63; --text-3: #8B8B93;
+  --accent: #1D4ED8; --accent-hover: #1E40AF; --accent-text: #FFFFFF;
+  --accent-soft: #EBF1FE; --accent-line: #CCDBFC; --chart-muted: #BCD0FA;
+  --good: #1F7A4D; --good-bg: #E8F6EE; --good-line: #C6EAD5;
+  --wait: #8A5A00; --wait-bg: #FFF4DE; --wait-line: #F6DFAE;
+  --bad: #B4232F; --bad-bg: #FDECEE; --bad-line: #F7CDD2;
+  --active: #0E7490; --active-bg: #E5F6F9; --active-line: #BDE5EE;
+  --note: #6A3FB0; --note-bg: #F2ECFC; --note-line: #DFD1F6;
+  --shadow-border: 0 0 0 1px rgb(17 17 19 / 0.06), 0 1px 2px -1px rgb(17 17 19 / 0.06), 0 2px 4px 0 rgb(17 17 19 / 0.04);
+  --shadow-pop: 0 0 0 1px rgb(17 17 19 / 0.08), 0 12px 32px -8px rgb(17 17 19 / 0.18);
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg: #0E0E10; --surface: #161618; --surface-2: #1D1D20; --surface-3: #26262A;
+  --line: #26262A; --line-strong: #34343A;
+  --text: #F3F3F5; --text-2: #A3A3AC; --text-3: #6E6E77;
+  --accent: #3D6FF5; --accent-hover: #5A85FF; --accent-text: #FFFFFF;
+  --accent-soft: #111C36; --accent-line: #1E3366; --chart-muted: #22365F;
+  --good: #5CCB8F; --good-bg: #10261B; --good-line: #1C4130;
+  --wait: #F0B84F; --wait-bg: #2A2010; --wait-line: #4A3817;
+  --bad: #FF7A85; --bad-bg: #2C1316; --bad-line: #4C1F25;
+  --active: #4CC3D9; --active-bg: #0C2328; --active-line: #164049;
+  --note: #B79BF5; --note-bg: #1E1730; --note-line: #352857;
+  --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.07);
+  --shadow-pop: 0 0 0 1px rgb(255 255 255 / 0.09), 0 16px 40px -8px rgb(0 0 0 / 0.6);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #0E0E10; --surface: #161618; --surface-2: #1D1D20; --surface-3: #26262A;
+    --line: #26262A; --line-strong: #34343A;
+    --text: #F3F3F5; --text-2: #A3A3AC; --text-3: #6E6E77;
+    --accent: #3D6FF5; --accent-hover: #5A85FF; --accent-text: #FFFFFF;
+    --accent-soft: #111C36; --accent-line: #1E3366; --chart-muted: #22365F;
+    --good: #5CCB8F; --good-bg: #10261B; --good-line: #1C4130;
+    --wait: #F0B84F; --wait-bg: #2A2010; --wait-line: #4A3817;
+    --bad: #FF7A85; --bad-bg: #2C1316; --bad-line: #4C1F25;
+    --active: #4CC3D9; --active-bg: #0C2328; --active-line: #164049;
+    --note: #B79BF5; --note-bg: #1E1730; --note-line: #352857;
+    --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.07);
+    --shadow-pop: 0 0 0 1px rgb(255 255 255 / 0.09), 0 16px 40px -8px rgb(0 0 0 / 0.6);
+    color-scheme: dark;
+  }
+}
+
+/* Tailwind utilities: bg-surface, text-text-2, border-line, text-good, bg-good-bg … */
+@theme inline {
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-serif: 'Newsreader', Georgia, serif;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-text: var(--text);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-text: var(--accent-text);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+  --color-chart-muted: var(--chart-muted);
+  --color-good: var(--good);     --color-good-bg: var(--good-bg);     --color-good-line: var(--good-line);
+  --color-wait: var(--wait);     --color-wait-bg: var(--wait-bg);     --color-wait-line: var(--wait-line);
+  --color-bad: var(--bad);       --color-bad-bg: var(--bad-bg);       --color-bad-line: var(--bad-line);
+  --color-active: var(--active); --color-active-bg: var(--active-bg); --color-active-line: var(--active-line);
+  --color-note: var(--note);     --color-note-bg: var(--note-bg);     --color-note-line: var(--note-line);
+  --shadow-card: var(--shadow-border);
+  --shadow-pop: var(--shadow-pop);
+  --radius-xs: 4px; --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px;
+  --animate-shimmer-slide: shimmer-slide var(--speed) ease-in-out infinite alternate;
+  --animate-spin-around: spin-around calc(var(--speed) * 2) infinite linear;
+  --animate-marquee: marquee var(--duration) infinite linear;
+  --animate-border-beam: border-beam calc(var(--duration) * 1s) infinite linear;
+  --animate-shiny-text: shiny-text 8s infinite;
+  @keyframes shimmer-slide {
+  to {
+    transform: translate(calc(100cqw - 100%), 0);
+    }
+  }
+  @keyframes spin-around {
+  0% {
+    transform: translateZ(0) rotate(0);
+    }
+  15%, 35% {
+    transform: translateZ(0) rotate(90deg);
+    }
+  65%, 85% {
+    transform: translateZ(0) rotate(270deg);
+    }
+  100% {
+    transform: translateZ(0) rotate(360deg);
+    }
+  }
+  @keyframes shiny-text {
+  0%, 90%, 100% {
+    background-position: calc(-100% - var(--shiny-width)) 0;
+    }
+  30%, 60% {
+    background-position: calc(100% + var(--shiny-width)) 0;
+    }
+  }
+}
+
+@keyframes shimmer-slide { to { transform: translate(calc(100cqw - 100%), 0); } }
+@keyframes spin-around {
+  0% { transform: translateZ(0) rotate(0); }
+  15%, 35% { transform: translateZ(0) rotate(90deg); }
+  65%, 85% { transform: translateZ(0) rotate(270deg); }
+  100% { transform: translateZ(0) rotate(360deg); }
+}
+@keyframes marquee { from { transform: translateX(0); } to { transform: translateX(calc(-100% - var(--gap))); } }
+@keyframes border-beam { 100% { offset-distance: 100%; } }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+html { -webkit-text-size-adjust: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+::selection { background: var(--accent-soft); color: var(--text); }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+  ::view-transition-old(root), ::view-transition-new(root) {
+    animation: none;
+    mix-blend-mode: normal;
+}

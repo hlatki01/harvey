@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+from urllib.parse import urlparse
 from datetime import date as _date, time as _time
 from pathlib import Path
 
@@ -147,6 +148,9 @@ class EmailChannelConfig(BaseModel):
     # SMTP+IMAP mailbox: AgentMail, Fastmail, ...)
     provider: str = "instantly"
     max_daily_sends: int = 50
+    # Mail sent to persona.email by someone Harvey never contacted becomes a
+    # lead and gets a (reviewed) reply. Automated senders are ignored.
+    inbound_leads: bool = False
     # When True, also send to catch-all ("risky") domains, not just verified
     # mailboxes. Off by default — catch-alls accept everything, so a bad
     # guess still bounces.
@@ -217,9 +221,77 @@ class LinkedInChannelConfig(BaseModel):
     max_daily_messages: int = 10
 
 
+class DemoConfig(BaseModel):
+    """An example site for one kind of business. The first demo whose keywords
+    appear in a lead's category is the one offered; the model never writes
+    the URL itself."""
+
+    label: str                  # how to say it: "barbearias"
+    url: str
+    keywords: list[str]         # lowercase fragments of the category, PT or EN
+
+
+class WhatsAppChannelConfig(BaseModel):
+    """WhatsApp through a self-hosted Evolution API instance (.env: EVOLUTION_*).
+
+    Evolution drives an ordinary WhatsApp account over the unofficial Web
+    protocol. Cold messages to people who don't have you saved get numbers
+    banned: use a dedicated SIM, a low daily cap, and keep approval on.
+    """
+
+    enabled: bool = False
+    max_daily_sends: int = 20          # opening messages and replies together
+    max_new_per_cycle: int = 5         # new conversations drafted per heartbeat
+    require_approval: bool = True
+    # Answers to people who wrote first go out without review while opening
+    # messages (the risky ones, to strangers) still wait for approval.
+    auto_approve_replies: bool = False
+    model: str = ""                # Claude model for chat decisions (e.g. "haiku"); empty = brain.model
+    inbound_leads: bool = False    # a new number that writes first becomes a lead and is answered
+    inbound_max_age_minutes: int = 15   # ...but only if the message is this fresh
+    # A fast model decides; when it is unsure (not "high" confidence, or it cannot tell a
+    # person from an automatic message) a stronger one reviews before anyone is bothered.
+    review_ambiguous: bool = True
+    review_model: str = ""         # empty = brain.model (the provider's default)
+    poll_seconds: int = 5          # how often the live loop checks the chat for new messages
+    # Finer than auto_approve_replies: answers whose chosen action is listed
+    # here skip review (answer | qualify | send_demo | handoff).
+    auto_approve_actions: list[str] = []
+    # Example sites by kind of business, and the only links an answer may carry.
+    demos: list[DemoConfig] = []
+    # The only prices an answer may state (e.g. ["1.500", "297"]); any other
+    # R$ amount blocks the message. Empty: no price may be stated.
+    allowed_prices: list[str] = []
+    default_country_code: str = "55"
+    language: str = "Brazilian Portuguese"
+    # Every opening message ends with this; replying to it is an opt-out.
+    opt_out_line: str = "Se preferir não receber mensagens, responda SAIR."
+    # Only businesses carrying ALL of these confirmed signals (e.g.
+    # [NO_WEBSITE]) and none of the excluded ones. Empty: every business
+    # that has a phone.
+    require_signals: list[str] = []
+    exclude_signals: list[str] = []
+
+    @field_validator("max_daily_sends", "max_new_per_cycle")
+    @classmethod
+    def _non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+    @field_validator("model", "review_model", mode="before")
+    @classmethod
+    def _valid_model(cls, v) -> str:
+        v = str(v or "").strip()
+        if v and not _MODEL_NAME_RE.match(v):
+            raise ValueError(f"'{v}' is not a valid model name.")
+        return v
+
+
 class ChannelsConfig(BaseModel):
     email: EmailChannelConfig = EmailChannelConfig()
     linkedin: LinkedInChannelConfig = LinkedInChannelConfig()
+    whatsapp: WhatsAppChannelConfig = WhatsAppChannelConfig()
 
 
 PRECLEARED_ADDRESS_SOURCES = ("published", "bought", "scraped", "given", "unknown")
@@ -489,6 +561,26 @@ class WriterConfig(BaseModel):
     humanizer: bool = False
 
 
+class DashboardConfig(BaseModel):
+    # Where invited users reach the dashboard: the HTTPS address of a reverse
+    # proxy or tunnel that forwards to 127.0.0.1:5555. Empty keeps the
+    # dashboard loopback-only, with the single local token.
+    public_url: str = ""
+
+    @field_validator("public_url", mode="before")
+    @classmethod
+    def _origin_only(cls, v):
+        v = (v or "").strip().rstrip("/")
+        if not v:
+            return ""
+        parsed = urlparse(v)
+        local = parsed.hostname in ("localhost", "127.0.0.1")
+        bad_scheme = parsed.scheme not in ("https", "http") or (parsed.scheme == "http" and not local)
+        if bad_scheme or not parsed.hostname or parsed.path or parsed.query or parsed.fragment:
+            raise ValueError("dashboard.public_url must be an https origin like https://painel.example.com")
+        return v
+
+
 class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -498,6 +590,7 @@ class HarveyConfig(BaseModel):
     brain: BrainConfig = BrainConfig()
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
+    dashboard: DashboardConfig = DashboardConfig()
 
 
 class EnvConfig(BaseModel):
@@ -510,6 +603,11 @@ class EnvConfig(BaseModel):
     linkedin_password: str = ""
     hunter_api_key: str = ""
     serper_api_key: str = ""
+    google_places_api_key: str = ""
+    # WhatsApp via Evolution API (channels.whatsapp.enabled)
+    evolution_api_url: str = ""
+    evolution_api_key: str = ""
+    evolution_instance: str = ""
     reoon_api_key: str = ""
     zerobounce_api_key: str = ""
     # Native mail providers (channels.email.provider: gmail | smtp)
@@ -624,6 +722,10 @@ def load_env() -> EnvConfig:
         linkedin_password=os.getenv("LINKEDIN_PASSWORD", "").strip(),
         hunter_api_key=os.getenv("HUNTER_API_KEY", "").strip(),
         serper_api_key=os.getenv("SERPER_API_KEY", "").strip(),
+        google_places_api_key=os.getenv("GOOGLE_PLACES_API_KEY", "").strip(),
+        evolution_api_url=os.getenv("EVOLUTION_API_URL", "").strip().rstrip("/"),
+        evolution_api_key=os.getenv("EVOLUTION_API_KEY", "").strip(),
+        evolution_instance=os.getenv("EVOLUTION_INSTANCE", "").strip(),
         reoon_api_key=os.getenv("REOON_API_KEY", "").strip(),
         zerobounce_api_key=os.getenv("ZEROBOUNCE_API_KEY", "").strip(),
         gmail_client_id=os.getenv("GMAIL_CLIENT_ID", "").strip(),

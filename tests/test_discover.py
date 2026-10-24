@@ -444,6 +444,71 @@ async def test_serper_adapter():
     assert out[1].domain == "angi.com"
 
 
+GOOGLE_PLACES_PAGE1 = {"places": [
+    {"id": "A1", "displayName": {"text": "Oficina do Zé"},
+     "websiteUri": "https://www.oficinadoze.com.br/", "nationalPhoneNumber": "(11) 4000-1111",
+     "formattedAddress": "Rua X, 1", "rating": 4.6, "userRatingCount": 120,
+     "primaryTypeDisplayName": {"text": "Oficina mecânica"},
+     "googleMapsUri": "https://maps.google.com/?cid=1", "businessStatus": "OPERATIONAL"},
+    {"id": "B2", "displayName": {"text": "Sem Site Auto"}, "businessStatus": "OPERATIONAL"},
+    {"id": "C3", "displayName": {"text": "Fechada"}, "businessStatus": "CLOSED_PERMANENTLY"},
+], "nextPageToken": "tok"}
+GOOGLE_PLACES_PAGE2 = {"places": [
+    {"id": "D4", "displayName": {"text": "Segunda Página"},
+     "websiteUri": "https://segunda.com.br"},
+]}
+
+
+@pytest.mark.asyncio
+async def test_google_places_adapter_maps_fields_pages_and_costs():
+    provider = D.GooglePlaces()
+    seen = []
+
+    def handler(request):
+        import json
+        body = json.loads(request.content)
+        seen.append((request.headers["X-Goog-Api-Key"], body))
+        return httpx.Response(200, json=GOOGLE_PLACES_PAGE2 if "pageToken" in body
+                              else GOOGLE_PLACES_PAGE1)
+
+    provider.last_cost = 0.0
+    async with _client(handler) as client:
+        out = await provider.fetch(
+            client, {"google_places_api_key": "k"},
+            D.DiscoveryQuery(term="oficina", location="São Paulo",
+                             coordinate="-23.55,-46.63,80", limit=60))
+
+    assert [b.name for b in out] == ["Oficina do Zé", "Sem Site Auto", "Segunda Página"]
+    first, nosite = out[0], out[1]
+    assert first.domain == "oficinadoze.com.br" and first.has_website is True
+    assert first.review_count == 120 and first.external_id == "google_places:A1"
+    assert nosite.has_website is False and nosite.domain == ""
+    assert nosite.identity() == "google_places:B2"
+    assert seen[0][0] == "k"
+    # Radius is clamped to Google's 50 km maximum.
+    assert seen[0][1]["locationBias"]["circle"]["radius"] == 50_000
+    assert seen[1][1]["pageToken"] == "tok"
+    assert provider.last_cost == pytest.approx(2 * D.GooglePlaces.REQUEST_COST)
+
+
+@pytest.mark.asyncio
+async def test_google_places_errors_surface_the_message():
+    provider = D.GooglePlaces()
+    payload = {"error": {"message": "API key not valid"}}
+    with pytest.raises(RuntimeError, match="API key not valid"):
+        async with _client(lambda r: httpx.Response(403, json=payload)) as client:
+            await provider.fetch(client, {"google_places_api_key": "bad"},
+                                 D.DiscoveryQuery(term="oficina"))
+
+
+def test_google_places_estimate_counts_pages_not_results():
+    provider = D.GooglePlaces()
+    one = D.DiscoveryQuery(term="x", limit=20)
+    many = D.DiscoveryQuery(term="x", limit=500)
+    assert provider.estimate([one]) == pytest.approx(0.035)
+    assert provider.estimate([many]) == pytest.approx(3 * 0.035)  # Google stops at 60
+
+
 @pytest.mark.asyncio
 async def test_dataforseo_errors_surface_the_message_not_just_the_code():
     """A bare status code costs several wrong guesses; the body usually makes

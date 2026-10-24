@@ -587,29 +587,8 @@ def test_dashboard_codex_quota_client_follows_the_configured_model(client, monke
     assert built == ["gpt-5.5"]
 
 
-def _render_js(func: str, data, helpers=("escHtml", "formatDate")) -> str:
-    """Run one app.js render function (and the helpers it uses) under node."""
-    import json
-    import re
-    import shutil
-    import subprocess
-
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is not installed")
-    source = (Path(dash.__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
-    funcs = []
-    for name in (*helpers, func):
-        match = re.search(rf"^function {name}\(.*?^}}\n", source, re.S | re.M)
-        assert match, name
-        funcs.append(match.group(0))
-    script = "\n".join(funcs) + f"\nprocess.stdout.write({func}({json.dumps(data)}));"
-    return subprocess.run([node, "-e", script], capture_output=True, text=True,
-                          check=True, timeout=30).stdout
 
 
-def _render_quota_card(data) -> str:
-    return _render_js("quotaCardHtml", data)
 
 
 def test_paused_brain_is_visible_on_the_dashboard(client, monkeypatch):
@@ -621,10 +600,8 @@ def test_paused_brain_is_visible_on_the_dashboard(client, monkeypatch):
     monkeypatch.setattr(dash, "_active_brain", lambda: BrainConfig(provider="codex"))
     stats = client.get("/api/stats").json()
     assert stats["brain_status"]["status"] == "paused"
-    html = _render_js("brainCallChips", stats)
-    assert "Codex <b>paused</b>" in html and "login has expired" in html
-    healthy = _render_js("brainCallChips", {**stats, "brain_status": {}})
-    assert "paused" not in healthy
+    assert "login has expired" in stats["brain_status"]["reason"]
+    # How the browser shows it is covered in web-ui/src/pages/Usage.test.tsx.
 
 
 def _status_cli(monkeypatch, tmp_path, capsys, *, check, config, setting=""):
@@ -679,22 +656,8 @@ def test_cli_status_check_reports_readiness(monkeypatch, tmp_path, capsys):
     assert "Claude CLI isolation flags present (login not checked" in out
 
 
-def test_quota_card_renders_unavailable_codex_quota():
-    html = _render_quota_card({"quota_provider": "codex", "quota_status": "unavailable",
-                               "quota": None})
-    assert "Codex (ChatGPT plan) Quota" in html
-    assert "Quota unavailable" in html and "ChatGPT plan" in html
-    assert "progress-bar" not in html
 
 
-def test_quota_card_renders_gauges_and_limit_reached():
-    html = _render_quota_card({"quota_provider": "codex", "quota_status": "available",
-                               "quota": {"limit_reached": {"utilization": 100.0,
-                                                           "resets_at": ""}}})
-    assert "Usage limit reached" in html and "100%" in html
-    assert _render_quota_card({"quota_provider": "", "quota": None}) == ""
-    claude = _render_quota_card({"quota_provider": "claude", "quota": None})
-    assert "Claude Subscription Quota" in claude and "unavailable" in claude
 
 
 def test_cli_usage_reads_only_the_active_providers_quota(monkeypatch, tmp_path, capsys):
@@ -738,7 +701,6 @@ def test_dashboard_hides_another_providers_pause(client, monkeypatch):
     monkeypatch.setattr(dash, "_active_brain", lambda: BrainConfig())  # now Claude
     stats = client.get("/api/stats").json()
     assert stats["brain_status"] == {}
-    assert "paused" not in _render_js("brainCallChips", stats)
     monkeypatch.setattr(dash, "_active_brain", lambda: BrainConfig(provider="codex"))
     assert client.get("/api/stats").json()["brain_status"]["status"] == "paused"
 

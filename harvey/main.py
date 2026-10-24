@@ -1,9 +1,11 @@
 """Harvey's main heartbeat loop. Always Be Closing."""
 
 import asyncio
+import os
 import logging
 import signal
 import sys
+from pathlib import Path
 from datetime import datetime, time, timedelta
 
 import pytz
@@ -42,7 +44,7 @@ CYCLE_TIMEOUT_SECONDS = 600
 QUIET_HOURS_POLL_SECONDS = 300
 
 # Phase-1 tasks that read replies; sending waits for all of them to succeed.
-REPLY_READERS = ("handle_replies", "read_replies")
+REPLY_READERS = ("handle_replies", "read_replies", "read_whatsapp")
 
 
 def in_quiet_hours(config: HarveyConfig) -> bool:
@@ -197,6 +199,42 @@ async def _interruptible_sleep(seconds: float, stop_event: asyncio.Event) -> boo
         return False
 
 
+ALIVE_SECONDS = 20
+
+
+async def alive_beacon(path, stop_event: asyncio.Event):
+    """Touch a file next to the DB while the loop runs: the dashboard lives in another
+    container and can't see this process, so a fresh mtime is how it knows Harvey is on."""
+    while not stop_event.is_set():
+        try:
+            path.touch()
+        except OSError:
+            pass
+        await _interruptible_sleep(ALIVE_SECONDS, stop_event)
+
+
+async def whatsapp_live(handler, whatsapp, stop_event: asyncio.Event):
+    """Answer WhatsApp as it happens. Chat is synchronous: a lead should not
+    wait for the heartbeat (profiling, prospecting) to be read and answered.
+    Each pass reads new messages, lets the decision engine handle them, and
+    sends approved replies. Openings stay with the heartbeat."""
+    poll = max(whatsapp.cfg.poll_seconds, 2)
+    failures = 0
+    while not stop_event.is_set():
+        try:
+            await handler.run_whatsapp()
+            await whatsapp.send_replies()
+            failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            failures += 1
+            logger.error(f"WhatsApp live loop error (#{failures}): {e}")
+        wait = poll if not failures else min(poll * 2 ** failures, 300)
+        if await _interruptible_sleep(wait, stop_event):
+            break
+
+
 async def heartbeat(stop_event: asyncio.Event | None = None):
     """Harvey's main loop. Wakes up, decides, acts, sleeps. Repeat."""
     if stop_event is None:
@@ -229,6 +267,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
     await state.init_db()
     logger.info("Database initialized.")
+    # A restart killed whatever this loop had running; nothing it started can still be going.
+    if (n := await state.sweep_stale_runs(older_than_hours=0)):
+        logger.info("Closed %d run(s) left over from the previous process.", n)
 
     # Import agents here to avoid circular imports
     from harvey.agents.scout import Scout
@@ -236,13 +277,19 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     from harvey.agents.sender import Sender
     from harvey.agents.handler import Handler
     from harvey.agents.analyst import Analyst
+    from harvey.learn import propose_lessons
+    from harvey.agents.whatsapp import WhatsAppSender
 
     scout = Scout(brain, state, config, env)
     writer = Writer(brain, state, config, env)
     sender = Sender(brain, state, config, env)
     handler = Handler(brain, state, config, env)
+    whatsapp = WhatsAppSender(brain, state, config, env)
     analyst = Analyst(state)
 
+    beacon = asyncio.create_task(alive_beacon(Path(state.db_path).parent / "harvey.alive", stop_event))
+    live = (asyncio.create_task(whatsapp_live(handler, whatsapp, stop_event))
+            if whatsapp.is_active else None)
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
     consecutive_errors = 0
@@ -323,6 +370,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     tasks.append(("handle_replies", handler.run()))
             elif action == "idle":
                 tasks.append(("analyze", analyst.run()))
+                if whatsapp.is_active:
+                    tasks.append(("learn", propose_lessons(state, brain)))
 
             # Sending happens in a second phase, after every agent above has
             # finished: the handler's stop-on-reply must cancel follow-ups to
@@ -337,6 +386,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 send_tasks.append(("send_outbox", sender.run))
             if sender.is_native and not any(n == "handle_replies" for n, _ in tasks):
                 tasks.append(("read_replies", handler.run()))
+            if whatsapp.is_active:
+                tasks.append(("read_whatsapp", handler.run_whatsapp()))
+                send_tasks.append(("send_whatsapp", whatsapp.run))
 
             # Profiling rides along every cycle. It is three HTTP requests per
             # business with no model call, so it costs nothing against the
@@ -396,6 +448,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if await _interruptible_sleep(backoff, stop_event):
                 break
 
+    if live:
+        live.cancel()
+    beacon.cancel()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
 
 
@@ -407,7 +462,9 @@ def _needs_setup() -> bool:
     env_file = PROJECT_ROOT / ".env"
 
     # If .env doesn't exist, definitely needs setup
-    if not env_file.exists():
+    # In Docker the secrets arrive as environment variables (compose env_file),
+    # and the .env file is deliberately not copied into the container.
+    if not env_file.exists() and not os.environ.get("HARVEY_CONTAINER"):
         return True
 
     # harvey.local.yaml wins over the tracked harvey.yaml template, same

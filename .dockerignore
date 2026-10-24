@@ -1,0 +1,11 @@
+.venv
+.git
+data
+.env
+*.egg-info
+tests
+__pycache__
+*.pyc
+docs
+# UI source and its node_modules: the built dashboard in harvey/web is what ships
+harvey/web-ui

@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field, field_validator
 
 # Source tag for a prospect that is a company's general inbox, not a person.
 COMPANY_INBOX_SOURCE = "company_inbox"
+# Source tag for a prospect that is a business's own phone line (WhatsApp):
+# no named person, reached through the number the company lists.
+COMPANY_PHONE_SOURCE = "company_phone"
+# Someone who wrote to us first on WhatsApp; nothing is known about them yet.
+INBOUND_WHATSAPP_SOURCE = "inbound_whatsapp"
+INBOUND_EMAIL_SOURCE = "inbound_email"
 
 
 def _utcnow() -> datetime:
@@ -57,9 +63,14 @@ class Prospect(BaseModel):
         """A company's published general address (info@, office@) with no named person."""
         return self.source == COMPANY_INBOX_SOURCE
 
+    @property
+    def is_company_phone(self) -> bool:
+        """A business's listed phone number with no named person behind it."""
+        return self.source == COMPANY_PHONE_SOURCE
+
     def full_name(self) -> str:
         name = f"{self.first_name} {self.last_name}".strip()
-        if not name and self.is_company_inbox:
+        if not name and (self.is_company_inbox or self.is_company_phone):
             return f"{self.company} team" if self.company else "the team"
         return name
 
@@ -67,4 +78,6 @@ class Prospect(BaseModel):
         """A contact must have a name and title — or be a company inbox with an address."""
         if self.is_company_inbox:
             return bool(self.email and self.title)
+        if self.is_company_phone:
+            return bool(self.phone)
         return bool(self.first_name and self.last_name and self.title)

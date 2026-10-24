@@ -60,7 +60,7 @@ class Writer:
         logger.info("Writer: Crafting email campaigns...")
 
         # Load foundational skills for this agent
-        self.skills = self.brain.load_skills_for_agent("writer")
+        self.skills = self.brain.load_skills_for_agent("writer") + await self.state.lessons_block()
 
         # Get prospects that haven't been contacted yet
         new_prospects = await self.state.get_prospects_by_status("new")

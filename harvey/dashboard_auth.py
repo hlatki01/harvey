@@ -32,6 +32,15 @@ otherwise the API stays locked (fail closed) and the error says what to do.
 On Windows, POSIX permission bits mean nothing: the file gets whatever ACL
 the folder grants, and Harvey doesn't pretend otherwise (see README).
 
+Invited users (roles ``admin`` and ``operator``) come in a second way, only
+through the HTTPS address set in ``dashboard.public_url`` (a reverse proxy or
+tunnel that forwards to this loopback port and keeps the Host header): there
+the Host must be exactly that address, the Origin must be its origin, and the
+credential is a session cookie (HttpOnly, Secure, SameSite=Strict) created by
+``/api/auth/login``. The loopback token is never accepted on that address and
+the cookie is never read on loopback. Operators are refused the admin-only
+routes below.
+
 This does not protect against code already running as the same OS user,
 which can read the token file (or the database) directly.
 """
@@ -61,16 +70,46 @@ SECURITY_HEADERS = [
     (b"x-frame-options", b"DENY"),
     (b"cross-origin-opener-policy", b"same-origin"),
     (b"cross-origin-resource-policy", b"same-origin"),
-    # Inline handlers/styles are how the existing UI is written, so
-    # 'unsafe-inline' stays; connect-src 'self' still keeps fetches local.
+    # The React build has no inline scripts, so scripts run only from this
+    # origin. Styles keep 'unsafe-inline' for the style="" attributes that
+    # React and the animation library set; connect-src 'self' keeps fetches local.
     (b"content-security-policy",
-     b"default-src 'self'; script-src 'self' 'unsafe-inline'; "
-     b"style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
+     b"default-src 'self'; script-src 'self'; "
+     b"style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+     b"media-src 'self' blob:; font-src 'self'; "
      b"connect-src 'self'; object-src 'none'; base-uri 'none'; "
      b"form-action 'none'; frame-ancestors 'none'"),
 ]
 
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+SESSION_COOKIE = "harvey_session"
+
+# Reachable without signing in: log in, look up an invite, accept it.
+OPEN_AUTH_ROUTES = {("POST", "/api/auth/login"), ("POST", "/api/auth/invite-info"),
+                    ("POST", "/api/auth/accept")}
+
+# What operators may not touch. Read or write: users, settings and secrets,
+# logs, exports. Write only: pause/resume, start/stop, spend (signals,
+# discovery, profiling) and the lessons that steer the model.
+ADMIN_ALL = ("/api/users", "/api/settings", "/api/harvey/logs", "/api/export", "/api/cohort")
+ADMIN_WRITE = ("/api/harvey", "/api/sending", "/api/signals", "/api/discover", "/api/profile",
+               "/api/lessons")
+
+
+def needs_admin(method: str, path: str) -> bool:
+    if path.startswith(ADMIN_ALL):
+        return True
+    return method not in ("GET", "HEAD") and path.startswith(ADMIN_WRITE)
+
+
+def cookie_value(cookie_headers: list[str], name: str = SESSION_COOKIE) -> str:
+    for header in cookie_headers:
+        for part in header.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == name:
+                return value
+    return ""
 
 
 class TokenError(Exception):
@@ -303,9 +342,16 @@ class DashboardGuard:
     """ASGI middleware applying the checks in the module docstring to every
     request, and the security headers to every response."""
 
-    def __init__(self, app, store: TokenStore):
+    def __init__(self, app, store: TokenStore, public_origin=None, resolve_session=None):
         self.app = app
         self.store = store
+        # () -> "https://panel.example.com" or "" ; async (cookie value) -> user dict | None
+        self.public_origin = public_origin or (lambda: "")
+        self.resolve_session = resolve_session
+
+    @staticmethod
+    def _origin_host(origin: str) -> str:
+        return origin.split("://", 1)[-1].lower()
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -340,10 +386,13 @@ class DashboardGuard:
         # 1. Host, before anything else.
         hosts = headers.get("host", [])
         host = parse_host(hosts[0]) if len(hosts) == 1 else None
-        if host is None or not is_loopback(host):
+        host_header = hosts[0].lower() if len(hosts) == 1 else ""
+        public_origin = self.public_origin()
+        on_public = bool(host and public_origin and host_header == self._origin_host(public_origin))
+        if host is None or not (is_loopback(host) or on_public):
             return await deny(400, "bad_host",
                               "This dashboard only answers to localhost / 127.0.0.1.")
-        host_header = hosts[0].lower()
+        own_origin = public_origin.lower() if on_public else f"http://{host_header}"
 
         # 2. Browser provenance.
         public = is_public_path(method, path)
@@ -351,7 +400,7 @@ class DashboardGuard:
                       and headers.get("sec-fetch-mode", [""])[0] == "navigate"
                       and headers.get("sec-fetch-dest", [""])[0] == "document")
         origins = headers.get("origin", [])
-        if origins and (len(origins) != 1 or origins[0].lower() != f"http://{host_header}"):
+        if origins and (len(origins) != 1 or origins[0].lower() != own_origin):
             if not navigation:
                 return await deny(403, "cross_origin", "Cross-origin requests are refused.")
         site = headers.get("sec-fetch-site", [])
@@ -361,22 +410,47 @@ class DashboardGuard:
         if public:
             return await self.app(scope, receive, send_secured)
 
-        # 3. Token (fail closed when it can't be loaded).
-        try:
-            token = self.store.get()
-        except TokenError as e:
-            return await deny(503, "token_unavailable", str(e))
-        if not bearer_ok(headers.get("authorization", []), token):
-            return await deny(401, "unauthorized",
-                              "Open the link printed by 'harvey dashboard' to unlock.",
-                              extra=[(b"www-authenticate", b'Bearer realm="harvey"')])
+        async def json_only():
+            """Mutations carry JSON or nothing. True when it already refused."""
+            if method in _UNSAFE_METHODS:
+                length = headers.get("content-length", ["0"])[0].strip()
+                has_body = bool(headers.get("transfer-encoding")) or length not in ("", "0")
+                if has_body and not _is_json(headers.get("content-type", [""])[0]):
+                    await deny(415, "unsupported_media_type",
+                               "Request bodies must be application/json.")
+                    return True
+            return False
+
+        if (method, path) in OPEN_AUTH_ROUTES:
+            if await json_only():
+                return
+            return await self.app(scope, receive, send_secured)
+
+        # 3. Who is this. On loopback: the token (fail closed when it can't be
+        # loaded), which is the owner. On the public address: a session.
+        if on_public:
+            user = None
+            if self.resolve_session:
+                value = cookie_value(headers.get("cookie", []))
+                user = await self.resolve_session(value) if value else None
+            if user is None:
+                return await deny(401, "unauthorized", "Sign in to use the dashboard.")
+        else:
+            try:
+                token = self.store.get()
+            except TokenError as e:
+                return await deny(503, "token_unavailable", str(e))
+            if not bearer_ok(headers.get("authorization", []), token):
+                return await deny(401, "unauthorized",
+                                  "Open the link printed by 'harvey dashboard' to unlock.",
+                                  extra=[(b"www-authenticate", b'Bearer realm="harvey"')])
+            user = {"id": "", "email": "", "name": "Owner", "role": "admin"}
+        scope["harvey_user"] = user
+
+        if user["role"] != "admin" and needs_admin(method, path):
+            return await deny(403, "forbidden", "This needs an admin.")
 
         # 4. Mutations carry JSON or nothing.
-        if method in _UNSAFE_METHODS:
-            length = headers.get("content-length", ["0"])[0].strip()
-            has_body = bool(headers.get("transfer-encoding")) or length not in ("", "0")
-            if has_body and not _is_json(headers.get("content-type", [""])[0]):
-                return await deny(415, "unsupported_media_type",
-                                  "Request bodies must be application/json.")
-
+        if await json_only():
+            return
         return await self.app(scope, receive, send_secured)

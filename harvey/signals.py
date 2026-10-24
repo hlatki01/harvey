@@ -294,12 +294,17 @@ SIGNAL_CATALOG: list[dict] = [
 ]
 
 
+_SEEDED: set[str] = set()  # db files already seeded by this process
+
+
 async def seed_signal_catalog(state) -> int:
     """Register the catalog as PROPOSED signals awaiting user confirmation.
 
     Idempotent, and never overrides a decision the user already made: an
     existing signal keeps its confirmed/rejected status.
     """
+    if state.db_path in _SEEDED:
+        return len(SIGNAL_CATALOG)
     for sig in SIGNAL_CATALOG:
         await state.upsert_signal_code(
             sig["code"],
@@ -311,4 +316,5 @@ async def seed_signal_catalog(state) -> int:
             cost_note=sig["cost_note"],
             confidence_floor=sig.get("confidence_floor", 0.0),
         )
+    _SEEDED.add(state.db_path)
     return len(SIGNAL_CATALOG)

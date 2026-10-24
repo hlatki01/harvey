@@ -581,6 +581,97 @@ class Serper(DiscoveryProvider):
         return out
 
 
+class GooglePlaces(DiscoveryProvider):
+    """Google Maps itself, through Places API (New) Text Search.
+
+    Best coverage of businesses with no storefront on OpenStreetMap, and it
+    reports ``websiteUri``, so ``NO_WEBSITE`` works. It cannot report whether
+    a listing is claimed, so ``UNCLAIMED_LISTING`` is never recorded.
+    """
+
+    key = "google_places"
+    label = "Google Places"
+    kind = "listings"
+    blurb = ("Google Maps listings with phone, website, rating and review "
+             "count. Strongest coverage of local businesses outside the US.")
+    cost_note = ("~$0.035 per request (Enterprise fields), up to 3 pages of "
+                 "20 results; confirm against Google's current price list")
+    free_tier = "Monthly free usage per SKU; billing account required"
+    signup_url = "https://console.cloud.google.com/apis/library/places.googleapis.com"
+    env_keys = ("google_places_api_key",)
+    caveat = ("Max 60 results per search, so cover a city with several "
+              "queries. Google's terms limit caching Places data beyond the "
+              "place ID; read them before storing results long term. No "
+              "claimed-listing signal.")
+
+    URL = "https://places.googleapis.com/v1/places:searchText"
+    PAGE_SIZE = 20
+    MAX_PAGES = 3                  # Google stops after 60 results
+    MAX_RADIUS_M = 50_000
+    REQUEST_COST = 0.035
+    FIELDS = ",".join((
+        "places.id", "places.displayName", "places.websiteUri",
+        "places.nationalPhoneNumber", "places.formattedAddress",
+        "places.rating", "places.userRatingCount",
+        "places.primaryTypeDisplayName", "places.googleMapsUri",
+        "places.businessStatus", "nextPageToken",
+    ))
+
+    def _pages(self, limit: int) -> int:
+        return min(self.MAX_PAGES, max(1, -(-limit // self.PAGE_SIZE)))
+
+    def estimate(self, queries):
+        return sum(self._pages(q.limit) * self.REQUEST_COST for q in queries)
+
+    async def fetch(self, client, env, query):
+        body: dict = {"textQuery": query.keyword(), "pageSize": self.PAGE_SIZE}
+        if query.coordinate:
+            lat, lng, radius_km = (float(x) for x in query.coordinate.split(","))
+            body["locationBias"] = {"circle": {
+                "center": {"latitude": lat, "longitude": lng},
+                "radius": min(radius_km * 1000, self.MAX_RADIUS_M),
+            }}
+        headers = {"X-Goog-Api-Key": env["google_places_api_key"],
+                   "X-Goog-FieldMask": self.FIELDS,
+                   "Content-Type": "application/json"}
+
+        out: list[Business] = []
+        for _ in range(self._pages(query.limit)):
+            r = await client.post(self.URL, headers=headers, json=body)
+            if r.status_code != 200:
+                try:
+                    msg = r.json()["error"]["message"]
+                except Exception:
+                    msg = r.text[:200]
+                raise RuntimeError(f"Google Places {r.status_code}: {msg}")
+            self.last_cost += self.REQUEST_COST
+            data = r.json()
+            out.extend(self._to_business(p) for p in data.get("places") or []
+                       if p.get("businessStatus", "OPERATIONAL") == "OPERATIONAL")
+            token = data.get("nextPageToken")
+            if not token or len(out) >= query.limit:
+                break
+            body["pageToken"] = token
+        return out[:query.limit]
+
+    def _to_business(self, place: dict) -> Business:
+        url = place.get("websiteUri") or ""
+        return Business(
+            name=(place.get("displayName") or {}).get("text", ""),
+            domain=normalize_domain(url),
+            website=url,
+            phone=place.get("nationalPhoneNumber") or "",
+            address=place.get("formattedAddress") or "",
+            category=(place.get("primaryTypeDisplayName") or {}).get("text", ""),
+            rating=place.get("rating"),
+            review_count=place.get("userRatingCount"),
+            has_website=bool(url),
+            external_id=f"google_places:{place['id']}" if place.get("id") else "",
+            source_url=place.get("googleMapsUri") or "",
+            provider=self.key,
+        )
+
+
 class OpenStreetMap(DiscoveryProvider):
     """Genuinely free, no account, no key. Honest about what that costs you.
 
@@ -725,6 +816,7 @@ PROVIDERS: dict[str, DiscoveryProvider] = {
         DataForSEOListings(),
         DataForSEOSerp(),
         Serper(),
+        GooglePlaces(),
     )
 }
 

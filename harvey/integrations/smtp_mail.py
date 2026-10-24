@@ -151,6 +151,9 @@ class SmtpImapProvider(MailProvider):
             thread_ref=str(msg.get("In-Reply-To", "")).strip(),
             date=str(msg.get("Date", "")),
             is_bounce=looks_like_bounce(from_email, subject),
+            headers={name.lower(): str(msg.get(name)) for name in (
+                "From", "To", "Delivered-To", "X-Original-To", "Auto-Submitted", "Precedence",
+                "List-Unsubscribe") if msg.get(name)},
         )
 
     async def test_connection(self) -> tuple[bool, str]:

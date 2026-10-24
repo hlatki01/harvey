@@ -43,6 +43,7 @@ confirmed signals, searching contacts, and the same screen in dark mode:
 - [The skills library](#the-skills-library)
 - [The sub-agents](#the-sub-agents)
 - [Nothing sends without you](#nothing-sends-without-you)
+- [WhatsApp](#whatsapp)
 - [The dashboard](#the-dashboard)
 - [How the data is stored](#how-the-data-is-stored)
 - [Configuration](#configuration)
@@ -346,6 +347,28 @@ on Instantly; manage those in Instantly itself.
 
 ---
 
+## WhatsApp
+
+An optional second channel, through your own [Evolution API](https://github.com/EvolutionAPI/evolution-api) instance. It is aimed at the businesses email cannot reach: the ones with a phone number and no website.
+
+```yaml
+channels:
+  whatsapp:
+    enabled: true
+    require_signals: [NO_WEBSITE]   # optional: only businesses carrying these signals
+```
+
+```bash
+# .env: EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE
+harvey whatsapp test             # is the instance connected?
+```
+
+Each heartbeat Harvey takes businesses that have a phone and were never tried, asks WhatsApp whether the number exists, and writes **one** short opening message grounded in what it observed. The message ends with an opt-out line and waits in the same Outbox as email. Approved messages go out a few at a time with long random gaps. Replies are read by polling (`chat/findMessages`; turn on message persistence in Evolution), classified like email replies, answered through the same approval queue, and stop everything queued for that person. `SAIR`, `PARE` and similar Portuguese opt-outs are honored before the model is asked.
+
+**Read this before turning it on.** Evolution drives a normal WhatsApp account over the unofficial Web protocol, which breaks WhatsApp's terms, and cold messages to people who do not have you saved are what gets numbers banned. Use a dedicated SIM, keep `max_daily_sends` low and approval on. In Brazil the lawful basis for contacting a business is on you under the LGPD; the first message always says who you are and how to stop. The official WhatsApp Business Platform (templates, per-conversation fees) is the compliant route for messages you start. The Evolution endpoints are checked against mocked responses only, not a live instance.
+
+---
+
 ## The dashboard
 
 ```bash
@@ -358,7 +381,7 @@ harvey dashboard     # prints the link to open, e.g. http://127.0.0.1:5555/#toke
 
 **Windows:** the token file is protected by the permissions of the folder it lives in (your user profile normally restricts this to you); Harvey doesn't apply POSIX file modes there.
 
-Plain HTML, CSS and JavaScript served from `harvey/web/`. No build step, no framework, no bundler — edit `app.css` and reload. Fonts are vendored, so it renders correctly with the network off.
+A React + TypeScript app (Tailwind, shadcn/ui and [Magic UI](https://magicui.design) components) whose source is in `harvey/web-ui/` and whose build is committed in `harvey/web/`, so running Harvey needs Python only — no Node. To change the UI: `cd harvey/web-ui && npm ci`, then `npm run dev` (hot reload on :5173, proxying `/api` to a running `harvey dashboard`) and, when done, `npm run build` and commit `harvey/web/`. Fonts are vendored, so it renders correctly with the network off.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/today-dark.png">

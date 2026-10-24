@@ -1,22 +1,81 @@
+# Harvey as a locked-down stack.
+#
+#   harvey      the heartbeat loop and the live WhatsApp loop
+#   dashboard   the web UI; listens only on its own loopback
+#   cloudflared (profile "public") publishes the dashboard at dashboard.public_url
+#               through a Cloudflare Tunnel. It shares the dashboard's network
+#               namespace, so it reaches 127.0.0.1:5555 and nothing else does:
+#               no port is published on the host, and nothing is opened inbound.
+#
+# Evolution API keeps running from its own compose project (deploy_evolution
+# network); Harvey joins that network to reach it by name.
+#
+#   docker compose up -d --build                    # harvey + dashboard
+#   docker compose --profile public up -d           # + the tunnel
+#   docker compose exec dashboard python -m harvey dashboard --url   # owner link
+
+x-harvey: &harvey
+  build: .
+  image: harvey-app
+  init: true
+  restart: unless-stopped
+  env_file: .env
+  environment: &env
+    HARVEY_CONTAINER: "1"
+    # The host's http://127.0.0.1:18080 is not this container's loopback.
+    EVOLUTION_API_URL: http://evolution-api:8080
+  volumes: &volumes
+    # A named volume, not a bind mount: SQLite in WAL mode needs real shared
+    # memory between the two containers, which Windows bind mounts don't give.
+    - harvey-data:/app/data
+    - ./harvey.yaml:/app/harvey.yaml:ro
+    - ./harvey.local.yaml:/app/harvey.local.yaml:ro
+    - ./prompts:/app/prompts:ro
+    - ./skills:/app/skills
+    # Claude subscription login. Not read-only: the CLI refreshes tokens in place.
+    - ${CLAUDE_DIR:-~/.claude}:/home/harvey/.claude
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: ["/tmp", "/home/harvey/.cache"]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
 services:
   harvey:
-    build: .
-    env_file: .env
-    volumes:
-      # Persist database across restarts
-      - ./data:/app/data
-      # Mount config for easy editing without rebuild
-      - ./harvey.yaml:/app/harvey.yaml:ro
-      - ./prompts:/app/prompts:ro
-      - ./skills:/app/skills
-      # Mount Claude auth (required for Max plan usage).
-      # Not read-only: the CLI refreshes OAuth tokens in place.
-      # The container runs as non-root user "harvey" (uid 1000).
-      - ~/.claude:/home/harvey/.claude
+    <<: *harvey
+    networks: [default, evolution]
+
+  dashboard:
+    <<: *harvey
+    command: ["python", "-m", "harvey", "dashboard"]
+    networks: [default, evolution]   # the chat view reads WhatsApp history from Evolution
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5555), 3)"]
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    profiles: ["public"]
     restart: unless-stopped
-    init: true
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN:-}
+    network_mode: "service:dashboard"
+    # restart: true — it lives in the dashboard's network namespace, so it must follow every recreate.
+    depends_on:
+      dashboard: {condition: service_healthy, restart: true}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+
+volumes:
+  harvey-data:
+
+networks:
+  evolution:
+    name: deploy_evolution
+    external: true

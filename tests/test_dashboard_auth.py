@@ -79,7 +79,8 @@ def _protected_requests():
             continue
         path = re.sub(r"\{[^}]+\}", "x", route.path)
         for method in sorted(route.methods - {"HEAD"}):
-            out.append((method, path))
+            if (method, path) not in auth.OPEN_AUTH_ROUTES:   # sign in / accept an invite
+                out.append((method, path))
     return out
 
 
@@ -154,30 +155,46 @@ def test_no_cors_preflight_is_ever_approved(anon, authed):
 # ── The public shell ──
 
 
-@pytest.mark.parametrize("path", ["/", "/static/app.js", "/static/auth.js", "/static/app.css"])
-def test_shell_is_public_but_carries_no_data_or_token(anon, env, path):
-    r = anon.get(path)
-    assert r.status_code == 200
-    assert env["token"] not in r.text
-    assert r.headers["cache-control"] == "no-store"
-    assert r.headers["referrer-policy"] == "no-referrer"
-    assert r.headers["x-frame-options"] == "DENY"
-    assert r.headers["x-content-type-options"] == "nosniff"
-    csp = r.headers["content-security-policy"]
-    assert "frame-ancestors 'none'" in csp and "connect-src 'self'" in csp
+def _shell_paths(anon):
+    """The page plus the built script and stylesheet it loads."""
+    html = anon.get("/").text
+    assets = re.findall(r'(?:src|href)="(/static/assets/[^"]+)"', html)
+    assert any(a.endswith(".js") for a in assets) and any(a.endswith(".css") for a in assets)
+    return ["/", *assets]
+
+
+def test_shell_is_public_but_carries_no_data_or_token(anon, env):
+    for path in _shell_paths(anon):
+        r = anon.get(path)
+        assert r.status_code == 200, path
+        assert env["token"] not in r.text
+        assert r.headers["cache-control"] == "no-store"
+        assert r.headers["referrer-policy"] == "no-referrer"
+        assert r.headers["x-frame-options"] == "DENY"
+        assert r.headers["x-content-type-options"] == "nosniff"
+        csp = r.headers["content-security-policy"]
+        assert "frame-ancestors 'none'" in csp and "connect-src 'self'" in csp
+        assert "script-src 'self';" in csp and "unsafe-eval" not in csp
+
+
+def test_shell_has_no_inline_script(anon):
+    """script-src 'self' would silently block one, leaving a blank page."""
+    html = anon.get("/").text
+    assert not re.findall(r"<script(?![^>]*\bsrc=)[^>]*>", html)
+    assert not re.search(r"\son\w+=", html)
 
 
 def test_shell_has_no_token_bearing_links(anon):
     html = anon.get("/").text
     assert 'href="/api/' not in html
-    assert "/static/auth.js" in html
-    assert html.index("/static/auth.js") < html.index("/static/app.js")
     assert '<meta name="referrer" content="no-referrer">' in html
+    # The browser-side auth guarantees (token out of the URL before anything
+    # else runs, same-origin only) are tested under vitest in harvey/web-ui.
 
 
 def test_only_get_and_head_of_the_shell_are_public(anon):
     assert anon.post("/").status_code == 401
-    assert anon.post("/static/app.js").status_code == 401
+    assert anon.post(_shell_paths(anon)[1]).status_code == 401
 
 
 # ── Host: loopback names only, checked before the token ──
@@ -296,8 +313,8 @@ def test_top_level_navigation_to_the_shell_is_allowed_from_anywhere(anon):
     assert anon.get("/", headers=nav).status_code == 200
     # ...but not framing, subresources, or the API.
     assert anon.get("/", headers={**nav, "Sec-Fetch-Dest": "iframe"}).status_code == 403
-    assert anon.get("/static/app.js", headers={**CROSS_SITE,
-                                               "Sec-Fetch-Dest": "script"}).status_code == 403
+    assert anon.get(_shell_paths(anon)[1], headers={**CROSS_SITE,
+                                                    "Sec-Fetch-Dest": "script"}).status_code == 403
     assert anon.get("/api/companies", headers=nav).status_code == 403
 
 
@@ -812,63 +829,13 @@ eval(require('fs').readFileSync(process.argv[1], 'utf8') +
 """
 
 
-def _node(hash_value):
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is not installed")
-    out = subprocess.run([node, "-e", NODE_HARNESS, str(WEB / "auth.js"), hash_value],
-                         capture_output=True, text=True, check=True, timeout=30)
-    return json.loads(out.stdout)
 
 
-def test_fragment_token_moves_to_session_storage_and_leaves_the_url():
-    token = "T" * 43
-    out = _node(f"#token={token}")
-    assert out["stored"] == token
-    assert out["replaced"] == "/" and out["hashAfter"] == ""
-    assert out["call"]["auth"] == f"Bearer {token}"
-    assert out["call"]["url"] == "http://127.0.0.1:5555/api/companies"
-    assert out["call"]["ctype"] == "application/json"
-    assert out["call"]["mode"] == "same-origin" and out["call"]["credentials"] == "omit"
-    assert out["call"]["redirect"] == "error" and out["call"]["referrerPolicy"] == "no-referrer"
 
 
-def test_bad_fragment_is_stripped_but_not_stored():
-    out = _node("#token=<script>")
-    assert out["stored"] == "" and out["replaced"] == "/"
-    assert out["call"]["auth"] is None
 
 
-def test_token_is_never_sent_off_origin():
-    out = _node("#token=" + "T" * 43)
-    assert out["urls"] == ["http://127.0.0.1:5555/api/x", None, None, None, None, None,
-                           "http://127.0.0.1:5555/api/x?all=true"]
-    assert out["offOrigin"] == "refused"
-    assert out["calls"] == 1  # only the same-origin call went out
 
 
-def test_collected_links_cannot_run_script_in_the_dashboard():
-    """Websites and profile URLs come from scraped data; only http(s) links
-    are rendered, so a javascript: URL can't reach the token."""
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is not installed")
-    src = (WEB / "app.js").read_text(encoding="utf-8")
-    funcs = "".join(re.search(rf"^function {n}\(.*?^}}\n", src, re.S | re.M).group(0)
-                    for n in ("escHtml", "safeHref"))
-    urls = ["https://ok.example/a?b=1&c=2", "javascript:alert(1)", " JaVaScRiPt:x",
-            "data:text/html,x", "//evil.example", "vbscript:x"]
-    script = funcs + f"process.stdout.write(JSON.stringify({json.dumps(urls)}.map(safeHref)))"
-    out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True,
-                                    check=True, timeout=30).stdout)
-    assert out == ["https://ok.example/a?b=1&amp;c=2", "", "", "", "", ""]
-    assert 'href="\' + escHtml(' not in src
 
 
-def test_app_js_only_talks_to_the_api_through_authfetch():
-    app = (WEB / "app.js").read_text(encoding="utf-8")
-    assert re.findall(r"(?<![A-Za-z])fetch\(", app) == []
-    assert "authFetch(" in app
-    assert "localStorage.setItem('harvey-dashboard" not in app
-    html = (WEB / "index.html").read_text(encoding="utf-8")
-    assert "downloadCsv('/api/export/prospects.csv'" in html

@@ -191,6 +191,39 @@ def cmd_dashboard(args):
         sys.exit(2)
 
 
+def cmd_invite(args):
+    """Invite a dashboard user from the terminal: the way in for the first admin."""
+    from harvey import users as acct
+    from harvey.config import load_config
+    from harvey.state import StateManager
+
+    email = args.email.strip().lower()
+    if not acct.valid_email(email):
+        print(f"\n  That doesn't look like an email address: {args.email}\n")
+        sys.exit(2)
+    base = load_config().dashboard.public_url
+    if not base:
+        print("\n  Set dashboard.public_url in harvey.local.yaml first.\n")
+        sys.exit(2)
+
+    async def _invite():
+        state = StateManager()
+        await state.init_db()
+        existing = await state.get_user_by_email(email)
+        if existing and existing["status"] != "invited":
+            return None
+        token = acct.new_token()
+        await state.save_invite(email, args.name or "", args.role, acct.hash_token(token),
+                                acct.expiry(acct.INVITE_DAYS), "terminal")
+        return token
+
+    token = asyncio.run(_invite())
+    if token is None:
+        print(f"\n  {email} already has an account.\n")
+        sys.exit(2)
+    print(f"\n  Invite for {email} ({args.role}), valid {acct.INVITE_DAYS} days, one use:\n\n    {base}/#invite={token}\n")
+
+
 def cmd_status(args):
     """Show current pipeline status."""
     from harvey.state import StateManager
@@ -451,6 +484,39 @@ def cmd_microsoft(args):
             print(f"\n  {'✓' if ok else '✗'} {detail}\n")
             sys.exit(0 if ok else 1)
         asyncio.run(_test())
+
+
+def cmd_whatsapp(args):
+    """WhatsApp (Evolution API) utilities: test the connection."""
+    from harvey.config import load_env
+    from harvey.integrations.evolution import EvolutionClient
+
+    async def _test():
+        ok, detail = await EvolutionClient.from_env(load_env()).test_connection()
+        print(f"\n  {'✓' if ok else '✗'} {detail}\n")
+        sys.exit(0 if ok else 1)
+    asyncio.run(_test())
+
+
+def cmd_lessons(args):
+    """List, approve or reject the lessons Harvey proposed from corrections."""
+    from harvey.state import StateManager
+
+    async def _lessons():
+        state = StateManager()
+        await state.init_db()
+        for flag, status in ((args.approve, "approved"), (args.reject, "rejected")):
+            if flag:
+                n = await state.set_lesson_status(flag, status)
+                print(f"\n  {status.capitalize() + '.' if n else 'No lesson with that id.'}\n")
+                return
+        rows = await state.get_lessons()
+        print(f"\n  Lessons — {sum(r['status'] == 'proposed' for r in rows)} awaiting approval")
+        for r in rows:
+            print(f"  [{r['id']}] {r['status']:<9} {r['text']}")
+        print("\n  Approve: harvey lessons --approve <id>   |   Reject: harvey lessons --reject <id>\n")
+
+    asyncio.run(_lessons())
 
 
 def cmd_outbox(args):
@@ -841,6 +907,13 @@ def main():
                      help="Print the unlock link (with its token) and exit")
     sub.set_defaults(func=cmd_dashboard)
 
+    # harvey invite
+    sub = subparsers.add_parser("invite", help="Invite a dashboard user and print the link")
+    sub.add_argument("email")
+    sub.add_argument("--role", choices=("admin", "operator"), default="operator")
+    sub.add_argument("--name", default="")
+    sub.set_defaults(func=cmd_invite)
+
     # harvey status
     sub = subparsers.add_parser("status", help="Show pipeline status")
     sub.add_argument(
@@ -870,6 +943,12 @@ def main():
                      help="auth: one-time OAuth; test: verify connection")
     sub.set_defaults(func=cmd_gmail)
 
+    # harvey whatsapp test
+    sub = subparsers.add_parser("whatsapp", help="WhatsApp (Evolution API) setup")
+    sub.add_argument("whatsapp_action", choices=["test"],
+                     help="test: verify the Evolution instance is connected")
+    sub.set_defaults(func=cmd_whatsapp)
+
     # harvey microsoft auth|test
     sub = subparsers.add_parser("microsoft", help="Microsoft 365 provider setup")
     sub.add_argument("microsoft_action", choices=["auth", "test"],
@@ -877,6 +956,11 @@ def main():
     sub.set_defaults(func=cmd_microsoft)
 
     # harvey outbox
+    sub = subparsers.add_parser("lessons", help="Review lessons proposed from corrections")
+    sub.add_argument("--approve", metavar="ID")
+    sub.add_argument("--reject", metavar="ID")
+    sub.set_defaults(func=cmd_lessons)
+
     sub = subparsers.add_parser("outbox", help="Review/approve queued emails")
     sub.add_argument("--approve", metavar="ID", default="", help="Approve one item")
     sub.add_argument("--approve-all", action="store_true", help="Approve all pending")

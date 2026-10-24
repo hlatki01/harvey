@@ -8,6 +8,7 @@ import os
 import signal
 import stat
 import subprocess
+import time
 import sys
 import tempfile
 import uuid
@@ -31,6 +32,10 @@ DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
 ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "harvey.yaml"
 PID_FILE = PROJECT_ROOT / "data" / "harvey.pid"
+# In Docker the loop is its own container; this process must not spawn another.
+IN_CONTAINER = bool(os.environ.get("HARVEY_CONTAINER"))
+ALIVE_STALE_SECONDS = 90  # four missed beacons
+CONTAINER_NOTE = "Harvey runs as its own container: use 'docker compose restart harvey'."
 LOG_FILE = PROJECT_ROOT / "data" / "harvey.log"
 TOKEN_FILE = PROJECT_ROOT / "data" / "dashboard-token"
 
@@ -50,7 +55,31 @@ def _resolve_config_file() -> Path:
 # route except the static shell needs the token (see dashboard_auth).
 app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
 token_store = auth.TokenStore(TOKEN_FILE)
-app.add_middleware(auth.DashboardGuard, store=token_store)
+_public_cache: tuple[float, str] = (0.0, "")
+
+
+def _public_origin() -> str:
+    """dashboard.public_url from the config, re-read at most every 30 s."""
+    global _public_cache
+    import time
+    now = time.monotonic()
+    if now - _public_cache[0] > 30:
+        try:
+            from harvey.config import load_config
+            origin = load_config().dashboard.public_url
+        except Exception:
+            origin = ""
+        _public_cache = (now, origin)
+    return _public_cache[1]
+
+
+async def _session_user(cookie: str):
+    from harvey.users import hash_token
+    return await _state().get_session_user(hash_token(cookie))
+
+
+app.add_middleware(auth.DashboardGuard, store=token_store,
+                   public_origin=_public_origin, resolve_session=_session_user)
 
 # Harvey process tracking
 _harvey_process: subprocess.Popen | None = None
@@ -229,10 +258,16 @@ async def get_setup_status():
 
     # 4. Email verification (needed for addresses to be sendable, not 'guess')
     verifier_set = _has("REOON_API_KEY") or _has("ZEROBOUNCE_API_KEY") or _has("HUNTER_API_KEY")
+    try:
+        from harvey.config import load_config
+        whatsapp_on = load_config().channels.whatsapp.enabled
+    except Exception:
+        whatsapp_on = False
     checks.append({
         "id": "verifier", "label": "Email verification key",
         "done": verifier_set,
-        "required": True,
+        # Only cold email needs verified addresses; with WhatsApp on, email is optional.
+        "required": not whatsapp_on,
         "help": "Add a Reoon (free 600/mo), ZeroBounce, or Hunter key in Settings — "
                 "without one, found emails stay 'guess' and are never sent.",
     })
@@ -510,6 +545,10 @@ async def get_feedback(entity_type: str, entity_id: str):
 @app.get("/api/harvey/status")
 async def get_harvey_status():
     """Check if Harvey is currently running."""
+    if IN_CONTAINER:  # the loop is another container: its beacon file is the only sign of life
+        alive = DB_PATH.parent / "harvey.alive"
+        up = alive.exists() and time.time() - alive.stat().st_mtime < ALIVE_STALE_SECONDS
+        return {"running": up, "pid": None, "started_at": None}
     pid = _check_harvey_pid()
     started = _harvey_started_at.isoformat() if _harvey_started_at else None
     return {"running": pid is not None, "pid": pid, "started_at": started}
@@ -520,6 +559,8 @@ async def start_harvey():
     """Start Harvey's heartbeat loop as a subprocess."""
     global _harvey_process, _harvey_started_at
 
+    if IN_CONTAINER:
+        return {"success": False, "message": CONTAINER_NOTE}
     if _check_harvey_pid():
         return {"success": False, "message": "Harvey is already running."}
 
@@ -557,6 +598,9 @@ async def start_harvey():
 async def stop_harvey():
     """Stop the Harvey subprocess."""
     global _harvey_process, _harvey_started_at
+
+    if IN_CONTAINER:
+        return {"success": False, "message": CONTAINER_NOTE}
 
     pid = _check_harvey_pid()
     if not pid:
@@ -970,12 +1014,20 @@ async def outbox_edit(item_id: str, request: Request):
         # would block is refused now, while the reviewer can still fix it,
         # instead of failing quietly at send time. Content rules only: the
         # recipient isn't something an edit can change.
-        from harvey.gate import pre_send_check
+        from harvey.gate import pre_send_check, whatsapp_check
         checked = text
         footer = _compliance_view()["footer"]
-        if item.get("kind") == "sequence" and footer and not text.rstrip().endswith(footer):
-            checked = text.rstrip() + "\n\n" + footer  # as the Sender will send it
-        gate = pre_send_check("reviewer@example.com", subject, checked)
+        if item.get("channel") == "whatsapp":
+            from harvey.config import load_config
+            wa = load_config().channels.whatsapp
+            gate = whatsapp_check(
+                item.get("to_email", ""), text, kind=item.get("kind", "sequence"),
+                opt_out_line=wa.opt_out_line, allowed_prices=wa.allowed_prices,
+                allowed_links=[d.url for d in wa.demos])
+        else:
+            if item.get("kind") == "sequence" and footer and not text.rstrip().endswith(footer):
+                checked = text.rstrip() + "\n\n" + footer  # as the Sender will send it
+            gate = pre_send_check("reviewer@example.com", subject, checked)
         if not gate:
             return JSONResponse({"success": False,
                                  "message": "The sender would have blocked this: "
@@ -1188,6 +1240,31 @@ async def outbox_reject(item_id: str):
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
+@app.get("/api/lessons")
+async def lessons_list():
+    """Lessons Harvey proposed from corrections, awaiting a decision."""
+    try:
+        state = _state()
+        await state.init_db()
+        return {"lessons": await state.get_lessons("proposed")}
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/lessons/{lesson_id}/{decision}")
+async def lessons_decide(lesson_id: str, decision: str):
+    if decision not in ("approve", "reject"):
+        return _refuse("Unknown decision.")
+    try:
+        state = _state()
+        await state.init_db()
+        if not await state.set_lesson_status(lesson_id, decision + "d"):
+            return _refuse("No such lesson.")
+        return {"success": True}
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
 @app.post("/api/sending/{action}")
 async def sending_toggle(action: str):
     if action not in ("pause", "resume"):
@@ -1309,6 +1386,214 @@ async def get_conversations():
     return rows
 
 
+@app.post("/api/conversations/{convo_id}/send")
+async def conversation_send(convo_id: str, request: Request):
+    """The team answers a WhatsApp chat from the dashboard. Sent at once, as
+    a person: no model, no outbox. Never to someone who opted out."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    text = str(data.get("text") or "").strip() if isinstance(data, dict) else ""
+    if not text or len(text) > 1500:
+        return _refuse("Write a message (up to 1500 characters).")
+    rows = await query_db(
+        "SELECT c.channel, p.phone, p.status AS pstatus FROM conversations c "
+        "LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.id = ?", (convo_id,))
+    if not rows:
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    row = rows[0]
+    if row["channel"] != "whatsapp" or not row["phone"]:
+        return _refuse("Only WhatsApp chats can be answered here.")
+    if row["pstatus"] == "opted_out":
+        return _refuse("This person opted out. Nothing can be sent to them.")
+    from harvey.config import load_env
+    from harvey.integrations.evolution import EvolutionClient
+    from harvey.models.conversation import Message
+    client = EvolutionClient.from_env(load_env())
+    if not client.is_configured():
+        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
+                            status_code=503)
+    result = await client.send_text(row["phone"], text)
+    if not result.ok:
+        return JSONResponse({"success": False, "message": f"WhatsApp did not send it: {result.error}"},
+                            status_code=502)
+    state = _state()
+    convo = await state.get_conversation(convo_id)
+    convo.thread.append(Message(sender="team", content=text))
+    await state.update_conversation(convo_id, thread_json=convo.thread_json(), status="needs_human")
+    await state.log_action("whatsapp_sent", "dashboard", {
+        "to": row["phone"], "kind": "team", "message_id": result.message_id})
+    return {"success": True}
+
+
+async def _whatsapp_chat_of(convo_id: str):
+    """(phone, prospect status) of a WhatsApp conversation, or an error response."""
+    rows = await query_db(
+        "SELECT c.channel, p.phone, p.status AS pstatus FROM conversations c "
+        "LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.id = ?", (convo_id,))
+    if not rows:
+        return None, JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    row = rows[0]
+    if row["channel"] != "whatsapp" or not row["phone"]:
+        return None, _refuse("Only WhatsApp chats work here.")
+    return row, None
+
+
+def _evolution():
+    from harvey.config import load_env
+    from harvey.integrations.evolution import EvolutionClient
+    client = EvolutionClient.from_env(load_env())
+    return client if client.is_configured() else None
+
+
+_TIMELINE_ACTIONS = ("decision", "handoff", "escalation", "inbound_lead", "opt_out", "human_turn",
+                     "outbox_edited", "stage_whatsapp")
+
+
+@app.get("/api/conversations/{convo_id}/lead")
+async def conversation_lead(convo_id: str):
+    """Who this conversation is with: the lead, its company, the signals Harvey
+    found, and every contact so far (messages sent, decisions, handoffs)."""
+    rows = await query_db(
+        "SELECT c.id, c.prospect_id, c.channel, c.stage, c.intent, c.status, c.created_at, "
+        "p.first_name, p.last_name, p.email, p.phone, p.title, p.status AS pstatus, p.source, "
+        "p.score, p.industry, p.company, p.linkedin_url, p.company_id, p.created_at AS pcreated "
+        "FROM conversations c LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.id = ?", (convo_id,))
+    if not rows:
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    r = rows[0]
+    state = _state()
+    company, signals = None, []
+    if r.get("company_id"):
+        comp = await state.get_company(r["company_id"])
+        if comp:
+            company = {k: getattr(comp, k) for k in (
+                "name", "domain", "website", "industry", "location", "phone", "description", "source", "source_url")}
+            labels = {c["code"]: c.get("label") or c["code"] for c in await state.get_signal_codes()}
+            signals = [labels.get(code, code) for code in await state.company_signal_codes(comp.id)]
+    keys = [k for k in (r.get("phone"), r.get("email")) if k]
+    events = [{"ts": r["created_at"], "type": "conversation", "text": f"Conversation started ({r['channel']})"}]
+    for o in await query_db(
+            "SELECT created_at, sent_at, kind, status, channel, body FROM outbox WHERE prospect_id = ? ORDER BY created_at",
+            (r["prospect_id"],)):
+        what = "Opening message" if o["kind"] == "sequence" else "Reply"
+        events.append({"ts": o["sent_at"] or o["created_at"], "type": "message",
+                       "text": f"{what} ({o['channel'] or 'email'}) · {o['status']}: " + (o["body"] or "")[:140]})
+    for key in keys:
+        for a in await query_db(
+                f"SELECT created_at, action_type, details_json FROM actions WHERE action_type IN ({_in(_TIMELINE_ACTIONS)}) "
+                "AND details_json LIKE ? ORDER BY created_at", (*_TIMELINE_ACTIONS, f"%{key}%")):
+            try:
+                d = json.loads(a["details_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                d = {}
+            detail = d.get("reason") or d.get("overridden") or d.get("intent") or d.get("reply_preview") or ""
+            extra = f" ({d['action']})" if a["action_type"] == "decision" and d.get("action") else ""
+            events.append({"ts": a["created_at"], "type": a["action_type"],
+                           "text": a["action_type"].replace("_", " ").capitalize() + extra + (f": {detail}"[:160] if detail else "")})
+    events = list({(e["ts"], e["type"], e["text"]): e for e in events}.values())
+    events.sort(key=lambda e: str(e["ts"] or ""), reverse=True)
+    return {
+        "lead": {k: r.get(k) for k in ("first_name", "last_name", "phone", "email", "title", "pstatus",
+                                        "source", "score", "industry", "company", "linkedin_url", "pcreated")},
+        "conversation": {k: r.get(k) for k in ("stage", "intent", "status", "created_at")},
+        "company": company, "signals": signals, "history": events[:80],
+    }
+
+
+@app.get("/api/conversations/{convo_id}/chat")
+async def conversation_chat(convo_id: str, limit: int = 30, before: int = 0):
+    """The real WhatsApp chat (both directions, media included), newest
+    `limit` messages older than `before` (epoch seconds), oldest first."""
+    row, err = await _whatsapp_chat_of(convo_id)
+    if err:
+        return err
+    client = _evolution()
+    if client is None:
+        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
+                            status_code=503)
+    try:
+        messages, more = await client.get_chat(row["phone"], limit=max(1, min(limit, 60)), before=max(before, 0))
+    except Exception as e:
+        return JSONResponse({"success": False, "message": f"Could not read the chat: {e}"}, status_code=502)
+    kinds = await _state().get_whatsapp_sent_kinds()
+    for m in messages:
+        m["who"] = ("lead" if not m["from_me"]
+                    else "team" if kinds.get(m["id"]) == "team"
+                    else "harvey" if m["id"] in kinds else "team_phone")
+    return {"messages": messages, "has_more": more}
+
+
+@app.get("/api/conversations/{convo_id}/media/{message_id}")
+async def conversation_media(convo_id: str, message_id: str):
+    """One attachment of this chat (never one from another chat)."""
+    from fastapi.responses import Response
+    row, err = await _whatsapp_chat_of(convo_id)
+    if err:
+        return err
+    client = _evolution()
+    if client is None:
+        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
+                            status_code=503)
+    try:
+        recent, _ = await client.get_chat(row["phone"], limit=60)
+        known = {m["id"] for m in recent}
+        if message_id not in known:
+            older, _ = await client.get_chat(row["phone"], limit=200, before=min(m["ts"] for m in recent) if recent else 0)
+            known |= {m["id"] for m in older}
+        if message_id not in known:
+            return JSONResponse({"success": False, "message": "That file is not in this chat."}, status_code=404)
+        data, mimetype, filename = await client.get_media(message_id)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": f"Could not load the file: {e}"}, status_code=502)
+    return Response(content=data, media_type=mimetype or "application/octet-stream",
+                    headers={"Cache-Control": "private, max-age=3600",
+                             "Content-Disposition": 'inline; filename="%s"' % (filename or "file").replace('"', "")})
+
+
+MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024
+
+
+@app.post("/api/conversations/{convo_id}/attach")
+async def conversation_attach(convo_id: str, request: Request):
+    """The team sends a file on WhatsApp: {filename, mimetype, data (base64), caption}."""
+    import base64
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    filename = str(data.get("filename") or "file")[:120]
+    mimetype = str(data.get("mimetype") or "application/octet-stream")[:100]
+    caption = str(data.get("caption") or "").strip()[:1000]
+    b64 = str(data.get("data") or "").split(",")[-1]
+    if not b64 or len(b64) * 3 // 4 > MAX_ATTACHMENT_BYTES:
+        return _refuse("Pick a file up to 16 MB.", 400)
+    try:
+        base64.b64decode(b64, validate=True)
+    except Exception:
+        return _refuse("That file could not be read.", 400)
+    row, err = await _whatsapp_chat_of(convo_id)
+    if err:
+        return err
+    if row["pstatus"] == "opted_out":
+        return _refuse("This person opted out. Nothing can be sent to them.")
+    client = _evolution()
+    if client is None:
+        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
+                            status_code=503)
+    result = await client.send_media(row["phone"], filename, mimetype, b64, caption)
+    if not result.ok:
+        return JSONResponse({"success": False, "message": f"WhatsApp did not send it: {result.error}"},
+                            status_code=502)
+    state = _state()
+    await state.update_conversation(convo_id, status="needs_human")
+    await state.log_action("whatsapp_sent", "dashboard", {
+        "to": row["phone"], "kind": "team", "message_id": result.message_id, "file": filename})
+    return {"success": True}
+
+
 @app.post("/api/conversations/{convo_id}/status")
 async def set_conversation_status(convo_id: str, request: Request):
     """Close a conversation, or hand one Harvey escalated back to it.
@@ -1357,6 +1642,7 @@ async def get_trend(days: int = 14, tz: int = 0):
         "days": labels,
         "found": await per_day("prospects", "created_at"),
         "sent": await per_day("outbox", "sent_at", "AND status = 'sent'"),
+        "sent_whatsapp": await per_day("outbox", "sent_at", "AND status = 'sent' AND channel = 'whatsapp'"),
         "replies": await per_day("conversations", "created_at"),
     }
 
@@ -1751,6 +2037,121 @@ async def get_live_status():
     }
 
 
+# ── Notifications: what needs attention, derived from the state of things ──
+#
+# Each row is one thing (a conversation handed to you, the approval queue, a
+# system problem), not one event. They are recomputed when the bell asks: a
+# new message in a handed-over chat makes its notification unread again, and a
+# cause that is gone takes its notification away. Muted and archived ones stay.
+
+_wa_link = {"at": 0.0, "up": True}
+
+
+async def _whatsapp_link_up() -> bool:
+    """Is WhatsApp connected? Asked at most once a minute."""
+    import time
+    if time.time() - _wa_link["at"] < 60:
+        return _wa_link["up"]
+    from harvey.config import load_config, load_env
+    from harvey.integrations.evolution import EvolutionClient
+    up = True
+    if load_config().channels.whatsapp.enabled:
+        client = EvolutionClient.from_env(load_env())
+        try:
+            up = bool(client.is_configured()) and (await asyncio.wait_for(client.test_connection(), 3))[0]
+        except Exception:
+            up = False
+    _wa_link.update(at=time.time(), up=up)
+    return up
+
+
+async def _refresh_notifications(state) -> None:
+    raised: list[tuple] = []
+
+    async def raise_(key, title, detail="", tone="warn", tab="", target="", signature=""):
+        raised.append((key, title, detail, tone, tab, target, signature))
+
+    for c in await query_db(
+            "SELECT c.id, c.thread_json, c.channel, p.first_name, p.last_name, p.company FROM conversations c "
+            "LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.status = 'needs_human'"):
+        try:
+            thread = json.loads(c["thread_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            thread = []
+        who = " ".join(x for x in (c["first_name"], c["last_name"]) if x) or c["company"] or "A lead"
+        last = next((m["content"] for m in reversed(thread) if m.get("sender") == "prospect"), "")
+        await raise_(f"handoff:{c['id']}", f"{who} needs you", last[:140] or "Harvey handed this conversation over.",
+                     "bad", "conversations", c["id"], str(len(thread)))
+    pending = await state.get_outbox(status="pending_review", limit=500)
+    if pending:
+        n = len(pending)
+        await raise_("approvals", f"{n} message{'s' if n != 1 else ''} waiting for approval",
+                     "Nothing goes out until you approve it.", "warn", "outbox", "", str(n))
+    paused = await state.get_setting("sending_paused")
+    if paused:
+        await raise_("system:paused", "Sending is paused", str(paused), "bad", "outbox")
+    brain = await _brain_status()
+    if brain.get("status") == "paused":
+        await raise_("system:brain", "Harvey's model is paused",
+                     str(brain.get("reason") or "It can't be used right now.")[:200], "bad", "controls")
+    if not await _whatsapp_link_up():
+        await raise_("system:whatsapp", "WhatsApp is offline",
+                     "Harvey can't read or send chats until the Evolution instance reconnects.", "bad", "settings")
+    await state.sync_notifications(raised)
+
+
+@app.get("/api/notifications")
+async def notifications_list(view: str = "inbox"):
+    state = _state()
+    await state.init_db()
+    await _refresh_notifications(state)
+    return {"items": await state.get_notifications(view), "unread": await state.count_unread_notifications()}
+
+
+@app.post("/api/notifications/read-all")
+async def notifications_read_all():
+    await _state().mark_all_notifications_read()
+    return {"success": True}
+
+
+@app.post("/api/notifications/{nid}/{action}")
+async def notifications_act(nid: str, action: str):
+    status = {"read": "read", "mute": "muted", "unmute": "read", "archive": "archived", "unarchive": "read"}.get(action)
+    if not status:
+        return _refuse("Unknown action.", 400)
+    if not await _state().set_notification_status(nid, status):
+        return JSONResponse({"success": False, "message": "No such notification."}, status_code=404)
+    return {"success": True}
+
+
+@app.delete("/api/notifications/{nid}")
+async def notifications_delete(nid: str):
+    if not await _state().delete_notification(nid):
+        return JSONResponse({"success": False, "message": "No such notification."}, status_code=404)
+    return {"success": True}
+
+
+async def _whatsapp_today(state) -> dict:
+    """WhatsApp at a glance: is it on, connected, how much of today's cap is used."""
+    from harvey.config import load_config, load_env
+    from harvey.integrations.evolution import EvolutionClient
+    cfg = load_config().channels.whatsapp
+    if not cfg.enabled:
+        return {"enabled": False}
+    client = EvolutionClient.from_env(load_env())
+    connected = None
+    if client.is_configured():
+        try:
+            connected, _ = await asyncio.wait_for(client.test_connection(), 3)
+        except Exception:
+            connected = False
+    return {"enabled": True, "connected": connected,
+            "sent_today": await state.count_outbox_sent_today(channel="whatsapp"),
+            "cap": cfg.max_daily_sends,
+            "chats": len(await query_db(
+                "SELECT id FROM conversations WHERE channel = 'whatsapp' AND status IN ('open', 'needs_human')"))}
+
+
 @app.get("/api/today")
 async def get_today():
     """What needs a human, right now.
@@ -1788,7 +2189,14 @@ async def get_today():
         n_companies = companies[0]["n"] if companies else 0
 
         unprofiled_count = await state.count_companies_needing_profile()
+        wa = await _whatsapp_today(state)
+        pending_wa = sum(1 for i in pending if i.get("channel") == "whatsapp")
+        approved_wa = sum(1 for i in approved if i.get("channel") == "whatsapp")
         stats = {
+            "whatsapp": wa,
+            "outbox_pending_whatsapp": pending_wa,
+            "outbox_approved_whatsapp": approved_wa,
+            "live_conversations": open_convos + needs_human,
             "companies": n_companies,
             "prospects": sum(counts.values()),
             "signals_confirmed": len(confirmed),
@@ -1866,7 +2274,7 @@ async def get_today():
                 "key": "profile", "tone": "good",
                 "title": f"{unprofiled} companies not looked at yet",
                 "detail": ("Reading their websites is free and it is what makes "
-                           "an email specific — who their agency is, what they "
+                           "a first message specific — what they have, what they "
                            "are missing, whether they are spending on ads."),
                 "action": "Read their sites", "tab": "discover",
             })
@@ -1885,9 +2293,12 @@ async def get_today():
         if pending:
             items.append({
                 "key": "outbox", "tone": "warn",
-                "title": (f"{len(pending)} email waiting for approval" if len(pending) == 1
-                          else f"{len(pending)} emails waiting for approval"),
-                "detail": "Nothing sends until you approve it. Read them one at a time.",
+                "title": (f"{len(pending)} message waiting for approval" if len(pending) == 1
+                          else f"{len(pending)} messages waiting for approval"),
+                "detail": ("Nothing sends until you approve it. Read them one at a time"
+                           + (f" ({pending_wa} on WhatsApp, {len(pending) - pending_wa} by email)."
+                              if pending_wa and pending_wa != len(pending) else
+                              " (WhatsApp)." if pending_wa else ".")),
                 "action": "Open the decisions desk", "tab": "outbox",
             })
 
@@ -2189,6 +2600,225 @@ async def dashboard():
     return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
 
+# ── Accounts: sign in, invites, users ──
+
+_login_failures: dict[str, list[float]] = {}
+LOGIN_WINDOW, LOGIN_MAX = 900, 8
+
+
+def _login_blocked(key: str) -> bool:
+    import time
+    now = time.monotonic()
+    recent = [t for t in _login_failures.get(key, []) if now - t < LOGIN_WINDOW]
+    _login_failures[key] = recent
+    return len(recent) >= LOGIN_MAX
+
+
+def _login_failed(key: str) -> None:
+    import time
+    _login_failures.setdefault(key, []).append(time.monotonic())
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        data = await request.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _me(request: Request) -> dict:
+    return request.scope.get("harvey_user") or {}
+
+
+async def _start_session(response, user: dict) -> None:
+    from harvey import users as acct
+    token = acct.new_token()
+    await _state().create_session(acct.hash_token(token), user["id"], acct.expiry(acct.SESSION_DAYS))
+    await _state().touch_login(user["id"])
+    response.set_cookie(
+        auth.SESSION_COOKIE, token, max_age=acct.SESSION_DAYS * 86400, httponly=True,
+        secure=_public_origin().startswith("https://"), samesite="strict", path="/")
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    from harvey import users as acct
+    data = await _json_body(request)
+    email = str(data.get("email") or "").strip().lower()[:254]
+    password = str(data.get("password") or "")[:200]
+    if _login_blocked(email) or _login_blocked("*"):
+        return JSONResponse({"success": False, "message": "Too many attempts. Wait a few minutes."},
+                            status_code=429)
+    user = await _state().get_user_by_email(email) if email else None
+    ok = acct.check_password(password, (user or {}).get("password_hash", ""))
+    if not (ok and user and user["status"] == "active"):
+        _login_failed(email)
+        _login_failed("*")
+        return JSONResponse({"success": False, "message": "Wrong email or password."}, status_code=401)
+    response = JSONResponse({"success": True, "role": user["role"]})
+    await _start_session(response, user)
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    from harvey.users import hash_token
+    value = auth.cookie_value(request.headers.getlist("cookie"))
+    if value:
+        await _state().delete_session(hash_token(value))
+    response = JSONResponse({"success": True})
+    response.delete_cookie(auth.SESSION_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = _me(request)
+    return {"email": user.get("email", ""), "name": user.get("name", ""),
+            "role": user.get("role", "operator"), "owner": not user.get("id")}
+
+
+@app.post("/api/auth/invite-info")
+async def auth_invite_info(request: Request):
+    from harvey.users import hash_token
+    token = str((await _json_body(request)).get("token") or "")[:200]
+    user = await _state().get_user_by_invite(hash_token(token))
+    if not user:
+        return JSONResponse({"success": False, "message": "This invite is invalid or has expired."},
+                            status_code=404)
+    return {"success": True, "email": user["email"], "name": user["name"], "role": user["role"]}
+
+
+@app.post("/api/auth/accept")
+async def auth_accept(request: Request):
+    from harvey import users as acct
+    data = await _json_body(request)
+    token = str(data.get("token") or "")[:200]
+    password = str(data.get("password") or "")
+    name = str(data.get("name") or "").strip()[:80]
+    if len(password) < acct.MIN_PASSWORD or len(password) > 200:
+        return _refuse(f"Pick a password of at least {acct.MIN_PASSWORD} characters.")
+    user = await _state().get_user_by_invite(acct.hash_token(token))
+    if not user:
+        return JSONResponse({"success": False, "message": "This invite is invalid or has expired."},
+                            status_code=404)
+    await _state().activate_user(user["id"], acct.hash_password(password), name)
+    response = JSONResponse({"success": True, "role": user["role"]})
+    await _start_session(response, user)
+    return response
+
+
+async def _send_invite(user_id: str, email: str, name: str, role: str, invited_by: str) -> dict:
+    """(Re)issue an invite and email it with the SMTP/mailbox Harvey already
+    uses. The row exists either way, so a failed email can be resent."""
+    from harvey import users as acct
+    from harvey.config import load_config, load_env
+    from harvey.integrations.mail_provider import get_mail_provider
+
+    token = acct.new_token()
+    await _state().save_invite(email, name, role, acct.hash_token(token),
+                               acct.expiry(acct.INVITE_DAYS), invited_by)
+    base = _public_origin()
+    link = f"{base}/#invite={token}" if base else ""
+    result = {"success": True, "email_sent": False, "invite_url": link}
+    if not base:
+        result["message"] = "Set dashboard.public_url in harvey.local.yaml so the link points somewhere."
+        return result
+    config = load_config()
+    provider = get_mail_provider(config, load_env())
+    if provider is None or not provider.is_configured():
+        result["message"] = "No mailbox is configured to send the invite. Copy the link instead."
+        return result
+    who = name or email
+    body = (f"Olá {who},\n\n{invited_by or 'A equipe'} convidou você para o painel do Harvey "
+            f"como {'administrador' if role == 'admin' else 'operador'}.\n\n"
+            f"Crie sua senha neste link (vale por {acct.INVITE_DAYS} dias):\n{link}\n\n"
+            "Se você não esperava este convite, ignore este e-mail.")
+    sent = await provider.send_email(email, "Convite para o painel do Harvey", body)
+    result["email_sent"] = sent.ok
+    result["message"] = "Invite sent." if sent.ok else f"The email failed: {sent.error}"
+    return result
+
+
+@app.get("/api/users")
+async def users_list():
+    return {"users": await _state().list_users()}
+
+
+@app.post("/api/users/invite")
+async def users_invite(request: Request):
+    from harvey import users as acct
+    data = await _json_body(request)
+    email = str(data.get("email") or "").strip().lower()
+    name = str(data.get("name") or "").strip()[:80]
+    role = str(data.get("role") or "operator")
+    if not acct.valid_email(email):
+        return _refuse("That doesn't look like an email address.")
+    if role not in acct.ROLES:
+        return _refuse("Role must be admin or operator.")
+    existing = await _state().get_user_by_email(email)
+    if existing and existing["status"] != "invited":
+        return _refuse("That person already has an account.")
+    me = _me(request)
+    return await _send_invite("", email, name, role, me.get("name") or me.get("email") or "")
+
+
+@app.post("/api/users/{user_id}/resend")
+async def users_resend(user_id: str, request: Request):
+    user = await _state().get_user(user_id)
+    if not user or user["status"] != "invited":
+        return _refuse("Only a pending invite can be sent again.")
+    me = _me(request)
+    return await _send_invite(user["id"], user["email"], user["name"], user["role"],
+                              me.get("name") or me.get("email") or "")
+
+
+async def _other_user(user_id: str, request: Request):
+    """The target of an admin action, or a refusal. Nobody changes their own account."""
+    user = await _state().get_user(user_id)
+    if not user:
+        return None, JSONResponse({"success": False, "message": "No such user."}, status_code=404)
+    if user_id == _me(request).get("id"):
+        return None, _refuse("You can't change your own account.")
+    return user, None
+
+
+@app.post("/api/users/{user_id}/role")
+async def users_role(user_id: str, request: Request):
+    from harvey import users as acct
+    role = str((await _json_body(request)).get("role") or "")
+    if role not in acct.ROLES:
+        return _refuse("Role must be admin or operator.")
+    user, refusal = await _other_user(user_id, request)
+    if refusal:
+        return refusal
+    await _state().set_user_role(user["id"], role)
+    return {"success": True}
+
+
+@app.post("/api/users/{user_id}/status")
+async def users_status(user_id: str, request: Request):
+    status = str((await _json_body(request)).get("status") or "")
+    if status not in ("active", "disabled"):
+        return _refuse("Status must be active or disabled.")
+    user, refusal = await _other_user(user_id, request)
+    if refusal:
+        return refusal
+    if not await _state().set_user_status(user["id"], status):
+        return _refuse("This person hasn't accepted the invite yet.")
+    return {"success": True}
+
+
+@app.delete("/api/users/{user_id}")
+async def users_delete(user_id: str, request: Request):
+    user, refusal = await _other_user(user_id, request)
+    if refusal:
+        return refusal
+    await _state().delete_user(user["id"])
+    return {"success": True}
+
+
 class DashboardSetupError(Exception):
     """The dashboard can't start safely; the message says what to do."""
 
@@ -2230,9 +2860,14 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 5555):
     except (DashboardSetupError, auth.TokenError) as e:
         raise DashboardSetupError(str(e)) from e
 
-    print(f"\n  Harvey Dashboard running. Open this link to unlock it:\n\n    {url}\n")
-    print(f"  The token is stored in {token_store.path} (owner-only). Keep the link")
-    print("  private; anyone with it can use the dashboard. Press Ctrl+C to stop.\n")
+    if IN_CONTAINER:
+        # Container logs persist and get shared: keep the unlock link out of them.
+        print("\n  Harvey Dashboard running. Print the unlock link with:\n\n"
+              "    docker compose exec dashboard python -m harvey dashboard --url\n")
+    else:
+        print(f"\n  Harvey Dashboard running. Open this link to unlock it:\n\n    {url}\n")
+        print(f"  The token is stored in {token_store.path} (owner-only). Keep the link")
+        print("  private; anyone with it can use the dashboard. Press Ctrl+C to stop.\n")
     if os.name == "nt":
         print("  Windows: the token file is protected by your folder's permissions,")
         print("  not POSIX file modes.\n")

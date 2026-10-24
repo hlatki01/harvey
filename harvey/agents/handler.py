@@ -7,7 +7,9 @@ threshold — flips the global kill switch so a bad list can't torch the
 sending domain while nobody's watching.
 """
 
+import asyncio
 import html
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -16,12 +18,16 @@ from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
     DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, legacy_sending_held,
 )
+from harvey.decide import DEMO_TOKEN, Decision, apply_policy, find_demo, needs_review, parse_decision
+from harvey.gate import chat_brand
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
+from harvey.integrations.evolution import EvolutionClient
 from harvey.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
 )
 from harvey.models.conversation import Conversation, Message
+from harvey.models.prospect import INBOUND_EMAIL_SOURCE, INBOUND_WHATSAPP_SOURCE, Prospect
 from harvey.state import StateManager
 
 logger = logging.getLogger("harvey.handler")
@@ -46,6 +52,45 @@ INTENT_LABELS = {
 # deferred, or escalated to a human.
 AUTO_REPLY_INTENTS = {"interested", "objection", "question", "wrong_person"}
 
+# What the WhatsApp assistant may and may not do. It answers from the
+# knowledge base and nothing else; what it cannot ground there goes to the
+# team. The decision engine (harvey/decide.py) checks every proposal against
+# rules that do not depend on the model. (The email rules further down ask
+# for a call, which is wrong for a chat with an assistant.)
+INBOUND_ORIGIN_NOTE = (
+    "This person wrote to us first and we know nothing about them. Introduce yourself in a few words "
+    "(you are the virtual assistant of the company). If the message is not a business inquiry "
+    "(personal, a wrong number, spam), use wait and do not answer.\n")
+WHATSAPP_AUTO_NOTE = (
+    'An automatic message from a business (a bot, a menu, opening hours, ordering instructions, '
+    '"acesse", "digite 1", "mensagem automática") is "ooo", even when it contains a link or a question.\n')
+WHATSAPP_OPT_OUT_CONFIRMATION = "Tudo certo, não vou mais te mandar mensagens. Obrigado pela atenção!"
+
+WHATSAPP_DECISION_RULES = f"""
+Choose ONE action for the next message:
+- answer: the knowledge base covers what they asked
+- qualify: ask ONE question to learn what their business needs (only if you do not know yet)
+- send_demo: show the example site of their kind of business (only when one is available and not yet sent); write {DEMO_TOKEN} where the link goes, never a URL yourself
+- handoff: a person must take over: they want to hire, start, meet or talk to someone; or the knowledge base does not cover the question; or it needs a decision. The reply is a statement, never a question, saying "nossa equipe" (our team) will talk to them right here in this chat; never name a person
+- wait: nothing needs an answer (a thanks, an "ok", an emoji)
+
+Rules for the reply:
+- You are an automated virtual assistant answering in a chat: one to three short sentences, plain text, no greeting or signature
+- Answer ONLY from the knowledge base; never invent a service, price, deadline, discount, feature or technology
+- State prices only exactly as the knowledge base gives them
+- Answer what they asked first, then at most one question
+- NEVER offer to phone them or propose days or times: you cannot call or schedule
+- A demo is an example, never something built for a real client
+- If they ask whether you are a person or a bot, say you are a virtual assistant
+- Refer to the company without any web address (no ".com" or ".me")
+
+Answer with ONLY this JSON:
+{{"action": "answer|qualify|send_demo|handoff|wait", "reply": "...", "confidence": "high|medium|low", "reason": "one short sentence", "industry": "their kind of business, only if they just said it, else empty", "sender": "person|automatic|unclear", "intent": "interested|objection|not_interested|unsubscribe|escalate|ooo|wrong_person|question"}}
+intent: what their last message is. "unsubscribe" when they ask to stop being contacted; "escalate" when angry or threatening; "ooo" for any automatic message; "not_interested" for a clear no
+sender: "automatic" when the last message is a business bot, menu, away or ordering message; "person" when someone typed it; "unclear" when you cannot tell
+Use confidence low when you are guessing."""
+
+
 # Hard opt-out phrases. If any of these appear, we ALWAYS honor the
 # opt-out regardless of what the LLM classifier says.
 OPT_OUT_PATTERNS = (
@@ -64,6 +109,25 @@ OPT_OUT_PATTERNS = (
     "never contact",
     "delete my info",
     "delete my data",
+    # Portuguese (WhatsApp)
+    "descadastrar",
+    "sair da lista",
+    "me tire da lista",
+    "me remova",
+    "remover meu número",
+    "remover meu numero",
+    "não quero receber",
+    "nao quero receber",
+    "não me envie",
+    "nao me envie",
+    "não me mande",
+    "nao me mande",
+    "pare de enviar",
+    "pare de mandar",
+    "parem de enviar",
+    "parem de mandar",
+    "pare de me enviar",
+    "pare de me mandar",
 )
 # "No thanks" (what cold email's footer asks for) as a phrase: not "no
 # Thanksgiving", "Bruno / Thanks," or "yes or no, thanks".
@@ -72,7 +136,8 @@ NO_THANKS_RE = re.compile(
     r"(?<!\bor )\bno,?[ \t]+thank(?:s|[ \t]+you)\b(?![ \t]+(?:needed|necessary|required))")
 # A reply that says only this (signature aside) is an opt-out ("Reply STOP").
 BARE_OPT_OUTS = {"stop", "unsubscribe", "remove", "remove me", "opt out",
-                 "no thanks", "no thank you"}
+                 "no thanks", "no thank you",
+                 "sair", "pare", "parar", "remover", "descadastrar"}
 _MOBILE_SIGNATURE_RE = re.compile(
     r"^[ \t]*(?:sent from my \w[^\n]*|get outlook for \w[^\n]*|sent from \w+ mail[^\n]*)$",
     re.IGNORECASE | re.MULTILINE)
@@ -163,6 +228,19 @@ ESCALATION_PATTERNS = (
     "gdpr",
     "can-spam",
     "blacklist",
+    # Portuguese (WhatsApp)
+    "procon",
+    "advogado",
+    "processar",
+    "lgpd",
+    "anpd",
+    "denunciar",
+    "denúncia",
+    "denuncia",
+    "golpe",
+    "como conseguiu",
+    "onde conseguiu",
+    "como você conseguiu",
 )
 
 
@@ -179,7 +257,11 @@ class Handler:
         self.config = config
         self.instantly = InstantlyClient(env.instantly_api_key)
         self.provider = get_mail_provider(config, env)
+        whatsapp = getattr(config.channels, "whatsapp", None)
+        self.whatsapp = (EvolutionClient.from_env(env)
+                         if getattr(whatsapp, "enabled", False) else None)
         self.skills = ""
+        self._whatsapp_lock = asyncio.Lock()
 
     @property
     def is_native(self) -> bool:
@@ -198,7 +280,7 @@ class Handler:
         logger.info("Handler: Checking for replies...")
 
         # Load foundational skills for this agent
-        self.skills = self.brain.load_skills_for_agent("handler")
+        self.skills = self.brain.load_skills_for_agent("handler") + await self.state.lessons_block()
 
         if not self.config.channels.email.enabled:
             return True
@@ -298,10 +380,17 @@ class Handler:
         reply_uuid: str,
         campaign_id: str = "",
         reply_meta: dict | None = None,
+        prospect=None,
+        channel: str = "email",
     ):
-        """Classify, record, and respond to a single reply."""
-        # Find the prospect by email (indexed lookup)
-        prospect = await self.state.get_prospect_by_email(lead_email)
+        """Classify, record, and respond to a single reply.
+
+        lead_email is the sender's address; for another channel it is just a
+        label for the logs, and the caller passes the prospect it matched.
+        """
+        if prospect is None:
+            # Find the prospect by email (indexed lookup)
+            prospect = await self.state.get_prospect_by_email(lead_email)
         if not prospect:
             logger.warning(f"Handler: No prospect found for {lead_email}")
             return
@@ -336,9 +425,12 @@ class Handler:
             intent = "unsubscribe"
         elif any(p in keyword_text for p in ESCALATION_PATTERNS):
             intent = "escalate"
+        elif channel == "whatsapp":
+            intent = ""   # one model call decides intent and answer together, below
         else:
-            intent = await self._classify_intent(reply_text, prospect)
-        logger.info(f"Handler: Intent for {lead_email}: {intent}")
+            intent = await self._classify_intent(reply_text, prospect, channel)
+        if intent:
+            logger.info(f"Handler: Intent for {lead_email}: {intent}")
 
         # 2. The conversation as it will be, in memory only. Nothing about
         # this reply is stored until every model call it needs has succeeded:
@@ -350,6 +442,14 @@ class Handler:
         stored = next(
             (c for c in existing_convos if c.prospect_id == prospect.id), None
         )
+        # A WhatsApp chat handed to a human stays theirs: the person's next
+        # messages join the same thread and Harvey does not answer them.
+        human_turn = False
+        if stored is None and channel == "whatsapp":
+            stored = next(
+                (c for c in await self.state.get_conversations_by_status("needs_human")
+                 if c.prospect_id == prospect.id and c.channel == "whatsapp"), None)
+            human_turn = stored is not None
         if stored is not None:
             convo = stored.model_copy(deep=True)
         else:
@@ -357,21 +457,36 @@ class Handler:
                 id="",
                 prospect_id=prospect.id,
                 campaign_id=campaign_id,
-                channel="email",
+                channel=channel,
                 intent=intent,
                 status="open",
             )
         convo.thread.append(Message(sender="prospect", content=reply_text))
-        convo.intent = intent
         old_stage = convo.stage
-        convo.stage = self._determine_stage(intent, convo.stage, reply_text)
 
         # 2b. Draft the reply now, while nothing is stored yet. A held
         # Instantly setup can't send it, so don't spend a model call on it.
-        held = not self.is_native and legacy_sending_held(self.config)
+        held = (channel == "email" and not self.is_native
+                and legacy_sending_held(self.config))
         response = ""
-        if intent in AUTO_REPLY_INTENTS and not held:
-            response = await self._generate_response(intent, reply_text, prospect, convo)
+        decision: Decision | None = None
+        if not intent:
+            # WhatsApp: the decision engine reads the message once and returns
+            # what it is (intent) together with what to do about it.
+            if human_turn:
+                intent = "question"          # theirs to answer; Harvey stays out
+            else:
+                decision = await self._decide_whatsapp("", reply_text, prospect, convo)
+                intent, response = decision.intent, decision.reply
+            logger.info(f"Handler: Intent for {lead_email}: {intent}")
+        convo.intent = intent
+        convo.stage = self._determine_stage(intent, convo.stage, reply_text)
+        if decision is None and intent in AUTO_REPLY_INTENTS and not held and not human_turn:
+            if channel == "whatsapp":
+                decision = await self._decide_whatsapp(intent, reply_text, prospect, convo)
+                response = decision.reply
+            else:
+                response = await self._generate_response(intent, reply_text, prospect, convo)
 
         # 2c. Store the conversation in one write.
         if stored is None:
@@ -386,6 +501,13 @@ class Handler:
         if convo.stage != old_stage:
             logger.info(f"Handler: Stage for {lead_email}: {old_stage} -> {convo.stage}")
 
+        if human_turn and intent in AUTO_REPLY_INTENTS:
+            await self.state.log_action(
+                action_type="human_turn", agent="handler",
+                details={"prospect_phone": prospect.phone, "reply_preview": reply_text[:200]})
+            logger.info(f"Handler: {lead_email} wrote again; the chat is with a human, no auto-reply.")
+            return
+
         # 3. Route based on intent
         if intent == "unsubscribe":
             # Honor opt-outs ALWAYS. No reply, no future contact.
@@ -396,7 +518,12 @@ class Handler:
                 agent="handler",
                 details={"prospect_email": lead_email},
             )
-            logger.info(f"Handler: {lead_email} opted out. Suppressed permanently. No reply sent.")
+            if channel == "whatsapp":
+                # One fixed line so they know it worked; never a model's words.
+                await self._queue_whatsapp_reply(
+                    WHATSAPP_OPT_OUT_CONFIRMATION, prospect, convo, intent, action="wait",
+                    force_auto=True)
+            logger.info(f"Handler: {lead_email} opted out. Suppressed permanently.")
             return
 
         if intent == "escalate":
@@ -423,6 +550,12 @@ class Handler:
 
         if intent == "ooo":
             logger.info(f"Handler: {lead_email} is OOO. Will follow up later.")
+            if channel == "whatsapp" and decision is not None:
+                await self.state.log_action(
+                    action_type="decision", agent="handler",
+                    details={"prospect_phone": prospect.phone, "action": decision.action,
+                             "confidence": decision.confidence, "reason": decision.reason,
+                             "overridden": decision.overridden, "reply_preview": reply_text[:200]})
             return
 
         if intent not in AUTO_REPLY_INTENTS:
@@ -441,6 +574,14 @@ class Handler:
                 f"Handler: reply from {lead_email} held for a human: Instantly can't "
                 "queue replies for approval while require_approval is true."
             )
+            return
+
+        if decision is not None and decision.action == "wait":
+            await self.state.log_action(
+                action_type="decision", agent="handler",
+                details={"prospect_phone": prospect.phone, "action": "wait",
+                         "reason": decision.reason, "reply_preview": reply_text[:200]})
+            logger.info(f"Handler: {lead_email} needs no answer ({decision.reason or 'wait'}).")
             return
 
         # For interested, objection, question, wrong_person — the reply drafted above
@@ -462,7 +603,24 @@ class Handler:
 
         # Send the response — natively through the outbox approval ladder,
         # or immediately via Instantly (legacy).
-        if self.is_native:
+        if channel == "whatsapp":
+            await self._queue_whatsapp_reply(response, prospect, convo, intent, decision.action)
+            await self.state.log_action(
+                action_type="decision", agent="handler",
+                details={"prospect_phone": prospect.phone, "action": decision.action,
+                         "confidence": decision.confidence, "reason": decision.reason,
+                         "overridden": decision.overridden, "reply_preview": reply_text[:200]})
+            if decision.action == "handoff":
+                # The knowledge base ran out, or they want a person: put the
+                # chat on the dashboard's "needs you" list and stop answering.
+                await self.state.update_conversation(convo.id, status="needs_human")
+                await self.state.log_action(
+                    action_type="handoff", agent="handler",
+                    details={"prospect_phone": prospect.phone, "intent": intent,
+                             "reason": decision.overridden or decision.reason,
+                             "reply_preview": reply_text[:200]})
+                logger.warning(f"Handler: {prospect.phone} is ready for a human; chat handed over.")
+        elif self.is_native:
             await self._queue_native_reply(
                 response, prospect, convo, reply_meta or {}, intent
             )
@@ -515,6 +673,7 @@ class Handler:
                 if msg.is_bounce:
                     await self._handle_bounce(msg)
                 elif msg.body.strip():
+                    await self._adopt_inbound_email(msg)
                     await self._process_reply(
                         msg.from_email,
                         msg.body.strip(),
@@ -590,6 +749,137 @@ class Handler:
             await self.state.set_setting(KILL_SWITCH_KEY, reason)
             logger.error(f"Handler: KILL SWITCH ENGAGED — {reason}")
 
+    async def run_whatsapp(self) -> bool:
+        """Read WhatsApp replies and handle each one like an email reply.
+        Returns True only if every message was read and handled. One run at a
+        time: the live loop and the heartbeat both call this."""
+        async with self._whatsapp_lock:
+            return await self._run_whatsapp()
+
+    async def _adopt_inbound_email(self, msg):
+        """Mail addressed to the persona's own address, from someone we never
+        contacted, becomes a lead. Only that address: the mailbox also holds
+        invoices, newsletters and personal mail, which must not get a reply.
+        The reply still goes through the outbox approval ladder."""
+        cfg = getattr(self.config.channels.email, "inbound_leads", False)
+        persona = self.config.persona.email.strip().lower()
+        h = {k.lower(): v.lower() for k, v in (msg.headers or {}).items()}
+        addressed = persona and persona in " ".join(
+            h.get(k, "") for k in ("to", "delivered-to", "x-original-to"))
+        automated = (
+            any(w in msg.from_email for w in ("noreply", "no-reply", "donotreply", "do-not-reply", "naoresponda", "nao-responda"))
+            or h.get("auto-submitted", "no") != "no" or h.get("precedence") in ("bulk", "list", "junk")
+            or "list-unsubscribe" in h)
+        if not (cfg and addressed) or automated or await self.state.get_prospect_by_email(msg.from_email):
+            return
+        from email.utils import parseaddr
+        raw_from = next((v for k, v in (msg.headers or {}).items() if k.lower() == "from"), "")
+        name = parseaddr(raw_from)[0]
+        prospect = Prospect(
+            first_name=name.split()[0] if name else "", last_name=" ".join(name.split()[1:]),
+            company=name, email=msg.from_email, email_status="verified", email_verified=True,
+            source=INBOUND_EMAIL_SOURCE, status="new")
+        await self.state.add_prospect(prospect)
+        await self.state.log_action(
+            action_type="inbound_lead", agent="handler", details={"email": msg.from_email})
+        logger.info(f"Handler: new inbound lead from {msg.from_email}.")
+
+    async def _adopt_inbound_lead(self, msg):
+        """A number we never contacted wrote first: make it a lead, if it is a
+        stranger (this account never wrote to it) and the message is fresh.
+        Friends and customers already in the owner's chats are left alone."""
+        cfg = self.config.channels.whatsapp
+        if not cfg.inbound_leads:
+            return None
+        try:
+            age = datetime.now(timezone.utc).timestamp() - float(msg.date)
+        except ValueError:
+            age = 0
+        if age > cfg.inbound_max_age_minutes * 60 or not await self.whatsapp.is_new_contact(
+                msg.phone, await self.state.get_whatsapp_sent_ids()):
+            return None
+        name = msg.push_name.strip()
+        prospect = Prospect(
+            first_name=name.split()[0] if name else "", last_name=" ".join(name.split()[1:]),
+            company=name, phone=msg.phone, phone_verified=True,
+            source=INBOUND_WHATSAPP_SOURCE, status="new")
+        prospect.id = await self.state.add_prospect(prospect)
+        await self.state.log_action(
+            action_type="inbound_lead", agent="handler",
+            details={"phone": msg.phone, "name": name})
+        logger.info(f"Handler: new inbound lead from {msg.phone}.")
+        return prospect
+
+    async def _run_whatsapp(self) -> bool:
+        if self.whatsapp is None or not self.whatsapp.is_configured():
+            return True
+        if not self.skills:
+            self.skills = self.brain.load_skills_for_agent("handler")
+        try:
+            inbound = await self.whatsapp.get_replies()
+        except Exception as e:
+            logger.error(f"Handler: fetching WhatsApp replies failed: {e}")
+            return False
+
+        handled = 0
+        complete = True
+        for msg in inbound:
+            dedup_key = f"wa:{msg.provider_id}"
+            if await self.state.is_reply_processed(dedup_key):
+                continue
+            consumed = True
+            try:
+                prospect = await self.state.get_prospect_by_phone(msg.phone)
+                if prospect is None:
+                    prospect = await self._adopt_inbound_lead(msg)
+                if prospect:  # chats with anyone else are not ours to answer
+                    await self._process_reply(
+                        msg.phone, msg.body, reply_uuid="",
+                        prospect=prospect, channel="whatsapp")
+                    handled += 1
+            except BrainUnavailable as e:
+                consumed = False
+                complete = False
+                logger.error(f"Handler: stopping; replies are left for later ({e}).")
+                break
+            except Exception as e:
+                logger.error(f"Handler: error processing WhatsApp from {msg.phone}: {e}")
+                complete = False
+            finally:
+                if consumed:
+                    await self.state.mark_reply_processed(dedup_key)
+        if handled:
+            logger.info(f"Handler: processed {handled} WhatsApp message(s).")
+        return complete
+
+    async def _queue_whatsapp_reply(self, response: str, prospect, convo, intent: str,
+                                    action: str = "", force_auto: bool = False):
+        """Route Harvey's WhatsApp reply through the outbox. The approval
+        ladder applies unless replies, or this kind of action, are auto."""
+        cfg = self.config.channels.whatsapp
+        auto = force_auto or cfg.auto_approve_replies or action in cfg.auto_approve_actions
+        require_approval = cfg.require_approval and not auto
+        item_id = await self.state.add_outbox_item(
+            prospect_id=prospect.id,
+            conversation_id=convo.id,
+            kind="reply",
+            to_email=prospect.phone,
+            subject="WhatsApp",
+            body=response,
+            send_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+            status="pending_review" if require_approval else "approved",
+            provider=self.whatsapp.name,
+            channel="whatsapp",
+        )
+        if item_id:
+            mode = "queued for your approval" if require_approval else "queued to send"
+            logger.info(f"Handler: WhatsApp reply to {prospect.phone} {mode} ({intent}).")
+            await self.state.log_action(
+                action_type="reply_queued", agent="handler",
+                details={"prospect_phone": prospect.phone, "intent": intent,
+                         "response_preview": response[:100]},
+            )
+
     async def _queue_native_reply(
         self, response: str, prospect, convo, reply_meta: dict, intent: str
     ):
@@ -624,8 +914,15 @@ class Handler:
                          "response_preview": response[:100]},
             )
 
-    async def _classify_intent(self, reply_text: str, prospect) -> str:
+    def _model_kw(self, channel: str) -> dict:
+        """A per-call model override for chat, when one is configured."""
+        wa = getattr(self.config.channels, "whatsapp", None)
+        model = getattr(wa, "model", "") if channel == "whatsapp" else ""
+        return {"model": model} if model else {}
+
+    async def _classify_intent(self, reply_text: str, prospect, channel: str = "email") -> str:
         """Ask the brain to classify the reply's intent."""
+        auto_note = WHATSAPP_AUTO_NOTE if channel == "whatsapp" else ""
         prompt = f"""Classify this email reply into exactly ONE category:
 - "interested" — wants to learn more, open to a meeting, positive response
 - "objection" — has concerns but hasn't said no (price, timing, competition)
@@ -636,7 +933,7 @@ class Handler:
 - "wrong_person" — not the right contact, suggests someone else
 - "question" — asking for more information before deciding
 
-When in doubt between "not_interested" and "unsubscribe", choose "unsubscribe".
+{auto_note}When in doubt between "not_interested" and "unsubscribe", choose "unsubscribe".
 When in doubt between anything and "escalate", choose "escalate".
 
 Reply from {prospect.full_name()} ({prospect.title} at {prospect.company}):
@@ -647,6 +944,7 @@ Respond with ONLY the category label, nothing else."""
         result = await self.brain.think(
             prompt, session_id="harvey-handler",
             agent="handler", task="classify_intent",
+            **self._model_kw(channel),
         )
         if not result:
             paused = getattr(self.brain, "paused_reason", "")
@@ -711,6 +1009,91 @@ Respond with ONLY the category label, nothing else."""
                 return "qualifying"
 
         return current_stage
+
+    async def _decide_whatsapp(
+        self, intent: str, reply_text: str, prospect, convo: Conversation
+    ) -> Decision:
+        """The model proposes a decision for this chat; the policy in
+        harvey/decide.py turns it into what Harvey actually does."""
+        cfg = self.config.channels.whatsapp
+        demo = find_demo(prospect.industry, cfg.demos)
+        said = [m.content for m in convo.thread if m.sender == "harvey"]
+        queued = [i["body"] for i in await self.state.get_outbox(channel="whatsapp", limit=500)
+                  if i["prospect_id"] == prospect.id
+                  and i["status"] in ("pending_review", "approved", "sending", "sent")]
+        demo_sent = bool(demo and any(demo.url in t for t in said + queued))
+        history = "\n".join(
+            f"{'Theo' if m.sender == 'harvey' else 'Cliente'}: {m.content}"
+            for m in convo.thread[-8:])
+        persona = self.config.persona
+        lessons = await self.state.lessons_block()
+        if demo is None:
+            demo_line = ("none for this kind of business: do not offer an example site"
+                         if prospect.industry else
+                         "unknown until they tell you their kind of business (examples exist for: "
+                         + ", ".join(d.label for d in cfg.demos) + ")")
+        elif demo_sent:
+            demo_line = f'"{demo.label}", but it was already sent: do not send it again'
+        else:
+            demo_line = f'"{demo.label}" is ready: use {DEMO_TOKEN} for the link'
+        origin = (INBOUND_ORIGIN_NOTE if prospect.source == INBOUND_WHATSAPP_SOURCE and not said else "")
+        prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}, chatting on WhatsApp with a small business. Tone: {persona.tone}. Write in {cfg.language}.
+
+## The lead
+Business: {prospect.company or "unknown"}
+Kind of business: {prospect.industry or "unknown"}
+Example site available: {demo_line}
+{("Their last message was classified as: " + intent) if intent else ""}
+{origin}
+## Conversation
+{history}
+
+## KNOWLEDGE BASE (the only source for facts)
+{self.brain.load_skill("knowledge_base")}
+
+## How to chat
+{self.brain.load_skill("whatsapp_outreach")}
+{WHATSAPP_DECISION_RULES}
+{lessons}"""
+        raw = await self.brain.think_json(
+            prompt, session_id="harvey-handler", agent="handler", task="decide_whatsapp",
+            **self._model_kw("whatsapp"))
+        if raw is None:
+            paused = getattr(self.brain, "paused_reason", "")
+            if paused:
+                # The provider went down mid-chat; nothing is stored yet, so
+                # leave the message for a clean retry.
+                raise BrainUnavailable(paused)
+        first = parse_decision(raw)
+        if cfg.review_ambiguous and needs_review(first):
+            # The fast model was unsure: a stronger one looks again, with its
+            # proposal in front of it, before the chat is bothered or handed over.
+            proposal = json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else "nothing usable"
+            reviewed = await self.brain.think_json(
+                prompt + "\n\n## Second opinion\nA fast assistant proposed: " + proposal +
+                "\nIt was not sure. Decide for yourself, from the conversation and the knowledge base, "
+                "and answer with the same JSON. Do not hand over to a person unless it is really needed.",
+                session_id="harvey-handler", agent="handler", task="review_whatsapp",
+                **({"model": cfg.review_model} if cfg.review_model else {}))
+            if isinstance(reviewed, dict) and parse_decision(reviewed):
+                raw = reviewed
+                await self.state.log_action(
+                    action_type="decision_review", agent="handler",
+                    details={"prospect_phone": prospect.phone, "first": proposal[:300],
+                             "final_action": reviewed.get("action", "")})
+        told = str(raw.get("industry") or "").strip()[:60] if isinstance(raw, dict) else ""
+        if told and not prospect.industry:
+            # They just said what their business is: remember it, and the
+            # example site for it becomes available in this very answer.
+            prospect.industry = told
+            await self.state.set_prospect_industry(prospect.id, told)
+            demo = find_demo(told, cfg.demos)
+            demo_sent = bool(demo and any(demo.url in t for t in said + queued))
+        return apply_policy(
+            parse_decision(raw), prospect=prospect, reply_text=reply_text, demo=demo,
+            demo_sent=demo_sent, assistant_turns=len(said),
+            allowed_prices=cfg.allowed_prices, allowed_links=[d.url for d in cfg.demos],
+            flat=_flat)
 
     async def _generate_response(
         self, intent: str, reply_text: str, prospect, convo: Conversation

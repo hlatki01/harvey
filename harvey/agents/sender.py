@@ -547,7 +547,7 @@ class Sender:
             return
 
         max_daily = self.config.channels.email.max_daily_sends
-        sent_today = await self.state.count_outbox_sent_today()
+        sent_today = await self.state.count_outbox_sent_today(channel="email")
         budget = min(MAX_SENDS_PER_CYCLE, max_daily - sent_today)
         if budget <= 0:
             logger.info(f"Sender: daily send cap reached ({sent_today}/{max_daily}).")
@@ -557,13 +557,13 @@ class Sender:
         cold_cap = cold_daily_cap(self.config.channels.email)
         midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         cold_left = cold_cap - await self.state.count_outbox_sent_today(
-            kind="sequence",
+            kind="sequence", channel="email",
             since=midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat())
 
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         due = await self.state.get_outbox(
             status="approved", due_before=now, limit=budget * 3,
-            skip_unready_follow_ups=True,
+            skip_unready_follow_ups=True, channel="email",
         )
         # Cold emails held (by an unavailable compliance check, the cold
         # cap, a follow-up's spacing) stay approved and could fill the
@@ -573,7 +573,7 @@ class Sender:
         seen = {item["id"] for item in due}
         unchecked = await self.state.get_outbox(
             status="approved", due_before=now, limit=budget * 3,
-            exclude_kind="sequence",
+            exclude_kind="sequence", channel="email",
         )
         extra = [item for item in unchecked if item["id"] not in seen]
         if extra:

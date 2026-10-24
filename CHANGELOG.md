@@ -7,6 +7,16 @@ minor versions can still change behaviour.
 
 ## [Unreleased]
 
+### Changed
+
+- **The dashboard is now a React app.** The vanilla-JS UI was rewritten in
+  React + TypeScript with Tailwind, shadcn/ui and Magic UI components; every
+  tab, API route and security rule (token in the `#fragment`, same-origin-only
+  `authFetch`, sign-in and invite flows) is unchanged. The source lives in
+  `harvey/web-ui/` and its build is committed in `harvey/web/`, so running
+  Harvey still needs Python only. Editing the UI now means `npm run build`
+  in `harvey/web-ui/`.
+
 ### Added
 
 - **`harvey warmup [domain]`**: checks whether a sending domain is ready for
