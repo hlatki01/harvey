@@ -191,3 +191,9 @@ def test_a_whatsapp_only_pipeline_shows_whatsapp_steps_not_empty_email_ones(clie
     assert "Find emails" not in labels
     assert _step(data, "Sent on WhatsApp")["detail"] == "1 of 2 sent"
     assert data["next"] == "Review the 1 draft(s) waiting in the Outbox."
+
+
+def test_setup_checklist_counts_the_container_as_venv_and_env(client, monkeypatch):
+    monkeypatch.setattr(dash, "IN_CONTAINER", True)
+    done = {c["id"]: c["done"] for c in client.get("/api/setup-status").json()["checks"]}
+    assert done["venv"] and done["env_file"]

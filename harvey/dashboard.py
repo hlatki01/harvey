@@ -211,14 +211,15 @@ async def get_setup_status():
     # 1. Venv
     checks.append({
         "id": "venv", "label": "Python virtual environment",
-        "done": (PROJECT_ROOT / ".venv").is_dir(),
+        "done": IN_CONTAINER or (PROJECT_ROOT / ".venv").is_dir(),  # the image is the environment
         "required": True,
         "help": "Run: python3 -m venv .venv && source .venv/bin/activate && pip install -e .",
     })
 
     # 2. Env file
     env_vars = _read_env_file()
-    env_exists = ENV_FILE.exists() and bool(env_vars)
+    # in a container the compose env_file injects the keys; there is no .env on disk
+    env_exists = IN_CONTAINER or (ENV_FILE.exists() and bool(env_vars))
     checks.append({
         "id": "env_file", "label": "Environment file (.env)",
         "done": env_exists,
