@@ -179,3 +179,15 @@ def test_opted_out_and_unreachable_people_are_never_asked_to_be_sent(client, env
     _prospect(env, "p2", "b@acme.test", email_status="guess", status="queued")
     _campaign(env, "c1", ["p1", "p2"])
     assert "Open Campaigns" not in client.get("/api/live-status").json()["next"]
+
+
+def test_a_whatsapp_only_pipeline_shows_whatsapp_steps_not_empty_email_ones(client, env):
+    for oid, status in (("w1", "sent"), ("w2", "pending_review")):
+        _sql(env, "INSERT INTO outbox (id, prospect_id, step, to_email, subject, body, send_at, "
+                  "status, channel) VALUES (?, 'p1', 1, '', '', 'b', '2026-01-01T00:00:00', ?, "
+                  "'whatsapp')", (oid, status))
+    data = client.get("/api/live-status").json()
+    labels = [s["label"] for s in data["steps"]]
+    assert "Find emails" not in labels
+    assert _step(data, "Sent on WhatsApp")["detail"] == "1 of 2 sent"
+    assert data["next"] == "Review the 1 draft(s) waiting in the Outbox."

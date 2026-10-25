@@ -1927,6 +1927,12 @@ async def get_live_status():
     # itself, and never someone Harvey has queued, sent to, or can't reach.
     harvey_sends = _harvey_can_send()
     awaiting_review = await _scalar("SELECT COUNT(*) FROM outbox WHERE status = 'pending_review'")
+    # A WhatsApp-only operation has no emails to find, check or write: its funnel
+    # is the WhatsApp outbox, so the email steps would only read 0 forever.
+    wa = {r["status"]: r["n"] for r in await query_db(
+        "SELECT status, COUNT(*) AS n FROM outbox WHERE channel = 'whatsapp' GROUP BY status")}
+    wa_total = sum(n for k, n in wa.items() if k != "cancelled")
+    wa_only = bool(wa_total) and not with_email and not drafted
     by_hand: set[str] = set()
     if not harvey_sends:
         skip = await _harvey_committed_ids() | await _hand_sent_ids()
@@ -1988,10 +1994,7 @@ async def get_live_status():
     if no_site:
         read_detail += f" · {no_site} have no website (skipped)"
 
-    steps = [
-        step("Find businesses", companies, 0, finding,
-             f"{companies} businesses found", info=True),
-        step("Read their websites", profiled, with_site, reading, read_detail),
+    email_steps = [
         step("Find emails", checked, profiled, finding_emails,
              f"{checked} of {profiled} checked · {len(with_email)} emails found"),
         step("Check emails are real", len(with_email) - unconfirmed, len(with_email), False,
@@ -2002,6 +2005,18 @@ async def get_live_status():
              f"{len(drafted)} written · see Campaigns"),
         step("Sent", len(sent & drafted), len(drafted), False,
              f"{len(sent & drafted)} of {len(drafted)} sent"),
+    ]
+    whatsapp_steps = [
+        step("Write first messages", wa_total, wa_total, False,
+             f"{wa_total} written · {wa.get('pending_review', 0)} waiting for your review"),
+        step("Sent on WhatsApp", wa.get("sent", 0), wa_total, False,
+             f"{wa.get('sent', 0)} of {wa_total} sent"),
+    ]
+    steps = [
+        step("Find businesses", companies, 0, finding,
+             f"{companies} businesses found", info=True),
+        step("Read their websites", profiled, with_site, reading, read_detail),
+        *(whatsapp_steps if wa_only else email_steps),
         step("Replies", replies, 0, False,
              f"{replies} replies" if replies else "No replies yet", info=True),
     ]
@@ -2009,14 +2024,16 @@ async def get_live_status():
     next_tab = ""   # where the next step is done, when it's done in the dashboard
     if reading or finding:
         next_up = "Wait — Harvey is working. This page updates by itself."
-    elif finding_emails:
+    elif finding_emails and not wa_only:
         next_up = "Wait — emails are being found."
     elif stopped:
         next_up, next_tab = "A job stopped before finishing. Run it again.", "discover"
-    elif harvey_sends and awaiting_review:
+    elif (harvey_sends or wa_only) and awaiting_review:
         next_up, next_tab = f"Review the {awaiting_review} draft(s) waiting in the Outbox.", "outbox"
     elif by_hand:
         next_up, next_tab = f"Open Campaigns and send the {len(by_hand)} unsent email(s).", "campaigns"
+    elif wa_only:
+        next_up, next_tab = "Search more cities or industries to get more leads.", "discover"
     elif profiled > checked:
         next_up, next_tab = f"Find emails for the {profiled - checked} businesses not checked yet.", "controls"
     elif deliverable - drafted:
