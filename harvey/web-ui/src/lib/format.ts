@@ -29,7 +29,7 @@ const STATUS: Record<string, [string, Tone]> = {
   write_failed: ["Couldn't write", 'bad'], queued: ['Queued', 'active'], opted_out: ['Opted out', 'bad'],
   draft: ['Draft', 'waiting'], active: ['Active', 'good'], completed: ['Completed', 'idle'], paused: ['Paused', 'bad'],
   open: ['Open', 'active'], closed: ['Closed', 'idle'], closed_won: ['Won', 'good'], closed_lost: ['Lost', 'bad'],
-  objection: ['Objection', 'waiting'], question: ['Question', 'active'], ooo: ['Out of office', 'idle'],
+  objection: ['Objection', 'waiting'], question: ['Question', 'active'], ooo: ['Auto-reply', 'idle'],
   wrong_person: ['Wrong person', 'waiting'], unsubscribe: ['Unsubscribed', 'bad'],
   escalate: ['Needs a human', 'bad'], needs_human: ['Needs you', 'waiting'],
   pending_review: ['Waiting on you', 'waiting'], approved: ['Approved', 'good'], sending: ['Sending now', 'active'],

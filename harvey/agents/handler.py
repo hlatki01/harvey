@@ -63,7 +63,12 @@ INBOUND_ORIGIN_NOTE = (
     "(personal, a wrong number, spam), use wait and do not answer.\n")
 WHATSAPP_AUTO_NOTE = (
     'An automatic message from a business (a bot, a menu, opening hours, ordering instructions, '
-    '"acesse", "digite 1", "mensagem automática") is "ooo", even when it contains a link or a question.\n')
+    '"acesse", "digite 1", "mensagem automática") is "ooo", even when it contains a link or a question. '
+    'So is a canned greeting that answers our first message as if we were a customer who found them: '
+    'it welcomes us, thanks us for the contact, mentions their ad, gives opening hours, says someone '
+    'will answer soon, or asks our name or "como posso ajudar" without reacting to anything we said. '
+    'An attendant\'s name in it ("Aqui é a Pamela") changes nothing: receptionists use the same script. '
+    'Only a message that responds to what we actually wrote (our offer, sites, our question) is from a person.\n')
 WHATSAPP_OPT_OUT_CONFIRMATION = "Tudo certo, não vou mais te mandar mensagens. Obrigado pela atenção!"
 
 WHATSAPP_DECISION_RULES = f"""
@@ -88,6 +93,7 @@ Answer with ONLY this JSON:
 {{"action": "answer|qualify|send_demo|handoff|wait", "reply": "...", "confidence": "high|medium|low", "reason": "one short sentence", "industry": "their kind of business, only if they just said it, else empty", "sender": "person|automatic|unclear", "intent": "interested|objection|not_interested|unsubscribe|escalate|ooo|wrong_person|question"}}
 intent: what their last message is. "unsubscribe" when they ask to stop being contacted; "escalate" when angry or threatening; "ooo" for any automatic message; "not_interested" for a clear no
 sender: "automatic" when the last message is a business bot, menu, away or ordering message; "person" when someone typed it; "unclear" when you cannot tell
+{WHATSAPP_AUTO_NOTE}When it is automatic, sender is "automatic" and intent is "ooo".
 Use confidence low when you are guessing."""
 
 

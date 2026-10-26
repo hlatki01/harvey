@@ -2229,7 +2229,8 @@ async def _whatsapp_today(state) -> dict:
             "sent_today": await state.count_outbox_sent_today(channel="whatsapp"),
             "cap": cfg.max_daily_sends,
             "chats": len(await query_db(
-                "SELECT id FROM conversations WHERE channel = 'whatsapp' AND status IN ('open', 'needs_human')"))}
+                "SELECT id FROM conversations WHERE channel = 'whatsapp' AND status IN ('open', 'needs_human')"
+                " AND COALESCE(intent, '') != 'ooo'"))}
 
 
 @app.get("/api/today")
@@ -2257,10 +2258,16 @@ async def get_today():
         paused = await state.get_setting("sending_paused")
         counts = await state.count_prospects_by_status()
 
+        # A bot greeting or away message is not someone talking to us.
         convos = await query_db(
             "SELECT COUNT(*) AS n FROM conversations WHERE status = 'open'"
+            " AND COALESCE(intent, '') != 'ooo'"
         )
         open_convos = convos[0]["n"] if convos else 0
+        autos = await query_db(
+            "SELECT COUNT(*) AS n FROM conversations WHERE status = 'open' AND intent = 'ooo'"
+        )
+        auto_replies = autos[0]["n"] if autos else 0
         handed = await query_db(
             "SELECT COUNT(*) AS n FROM conversations WHERE status = 'needs_human'"
         )
@@ -2284,6 +2291,7 @@ async def get_today():
             "outbox_approved": len(approved),
             "open_conversations": open_convos,
             "needs_human": needs_human,
+            "auto_replies": auto_replies,
             "signals_proposed": len(proposed),
             "email_provider": _current_provider(),
             "unprofiled": unprofiled_count,
@@ -2387,7 +2395,8 @@ async def get_today():
                 "key": "replies", "tone": "good",
                 "title": (f"{open_convos} live conversation" if open_convos == 1
                           else f"{open_convos} live conversations"),
-                "detail": "People replied. Check how Harvey is handling them.",
+                "detail": "People replied. Check how Harvey is handling them."
+                          + (f" ({auto_replies} more were only automatic replies.)" if auto_replies else ""),
                 "action": "Read conversations", "tab": "conversations",
             })
 

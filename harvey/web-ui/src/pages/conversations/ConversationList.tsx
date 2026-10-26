@@ -17,7 +17,7 @@ export function Avatar({ c }: { c: Convo }) {
 function Item({ c, selected, onSelect }: { c: Convo; selected: boolean; onSelect: () => void }) {
   const last = (c.thread || []).slice(-1)[0]
   const snippet = c.draft ? 'Draft waiting for you' : last ? (last.sender === 'prospect' ? '' : 'You: ') + last.content : ''
-  const dot = c.status === 'needs_human' || c.draft ? 'bg-wait' : c.status === 'closed' ? 'bg-text-3' : 'bg-good'
+  const dot = c.status === 'needs_human' || c.draft ? 'bg-wait' : c.status === 'closed' || c.intent === 'ooo' ? 'bg-text-3' : 'bg-good'
   return (
     <button type="button" onClick={onSelect} aria-current={selected || undefined}
       className={cn('flex w-full items-center gap-2.5 rounded-md p-2.5 text-left hover:bg-surface-2',
@@ -30,7 +30,7 @@ function Item({ c, selected, onSelect }: { c: Convo; selected: boolean; onSelect
         </span>
         <span className="truncate text-[12px] text-text-3">{snippet || c.company || ''}</span>
       </span>
-      <span className={cn('size-2 flex-none rounded-full', dot)} title={statusMeta(c.status).label} />
+      <span className={cn('size-2 flex-none rounded-full', dot)} title={statusMeta(c.intent === 'ooo' && c.status === 'open' ? 'ooo' : c.status).label} />
     </button>
   )
 }

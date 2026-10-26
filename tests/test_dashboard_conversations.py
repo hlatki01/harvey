@@ -88,3 +88,12 @@ def test_conversation_status_rejects_bad_input(client):
     assert client.post("/api/conversations/c1/status", json={"status": "needs_human"}).status_code == 400
     assert client.post("/api/conversations/c1/status", json=["closed"]).status_code == 400
     assert client.post("/api/conversations/nope/status", json={"status": "closed"}).status_code == 404
+
+
+def test_today_does_not_count_a_bot_greeting_as_a_live_conversation(client):
+    _seed(client.db_path)   # c1: a real question
+    _sql(client.db_path, "INSERT INTO conversations (id, prospect_id, intent, status) VALUES ('c2', 'p2', 'ooo', 'open')")
+    today = client.get("/api/today").json()
+    assert today["stats"]["open_conversations"] == 1 and today["stats"]["auto_replies"] == 1
+    [live] = [i for i in today["items"] if i["key"] == "replies"]
+    assert live["title"] == "1 live conversation" and "1 more were only automatic" in live["detail"]

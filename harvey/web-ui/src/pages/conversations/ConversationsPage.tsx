@@ -9,10 +9,13 @@ import { ConversationCard } from './ConversationCard'
 import { ConversationList, PAGE } from './ConversationList'
 import type { Convo } from './types'
 
-type FilterId = 'needs' | 'open' | 'closed' | 'all'
+type FilterId = 'needs' | 'open' | 'auto' | 'closed' | 'all'
+// Only a bot or away message came back: nobody has actually answered yet.
+const isAuto = (c: Convo) => c.status === 'open' && c.intent === 'ooo'
 const FILTERS: [FilterId, string, (c: Convo) => boolean][] = [
   ['needs', 'Needs you', c => !!c.draft || c.status === 'needs_human'],
-  ['open', 'Open', c => c.status !== 'closed'],
+  ['open', 'Open', c => c.status !== 'closed' && !isAuto(c)],
+  ['auto', 'Auto-replies', isAuto],
   ['closed', 'Closed', c => c.status === 'closed'],
   ['all', 'All', () => true],
 ]
@@ -48,7 +51,7 @@ export function ConversationsPage() {
   }, [data, filter])
 
   const shown = useMemo(() => {
-    const f = FILTERS.find(x => x[0] === filter) || FILTERS[3]
+    const f = FILTERS.find(x => x[0] === filter) || FILTERS[4]
     return (data || []).filter(f[2]).map((c, i) => [c, i] as const)
       .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(x => x[0])
   }, [data, filter])
