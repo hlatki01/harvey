@@ -367,6 +367,31 @@ Each heartbeat Harvey takes businesses that have a phone and were never tried, a
 
 **Read this before turning it on.** Evolution drives a normal WhatsApp account over the unofficial Web protocol, which breaks WhatsApp's terms, and cold messages to people who do not have you saved are what gets numbers banned. Use a dedicated SIM, keep `max_daily_sends` low and approval on. In Brazil the lawful basis for contacting a business is on you under the LGPD; the first message always says who you are and how to stop. The official WhatsApp Business Platform (templates, per-conversation fees) is the compliant route for messages you start. The Evolution endpoints are checked against mocked responses only, not a live instance.
 
+### Pushes to your phone
+
+Harvey can send what needs you to your own WhatsApp number through the same Evolution instance, so you don't have to keep the dashboard open:
+
+```yaml
+notify:
+  whatsapp_number: "(11) 91234-5678"
+  events: [hot_lead, handoff, approvals, meeting, system]   # the default: all of them
+  hot_stages: [engaged, qualifying, closing]
+  approvals_every_minutes: 60
+```
+
+```bash
+harvey notify test               # sends a test push to that number
+```
+
+- `hot_lead` is sent when a conversation enters one of `hot_stages`.
+- `handoff` is sent when Harvey hands a chat to you.
+- `approvals` is sent when messages are waiting in the Outbox, at most once per `approvals_every_minutes`.
+- `system` is sent when sending is paused or the model is paused, at most once a day for each.
+- Each push is sent only once.
+- Messages from this number are never treated as a lead's, so you can reply to a push without starting a conversation.
+- Pushes ignore quiet hours.
+- If the Evolution instance itself is down, no push can reach you; the dashboard still shows it.
+
 ---
 
 ## The dashboard

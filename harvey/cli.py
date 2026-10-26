@@ -498,6 +498,25 @@ def cmd_whatsapp(args):
     asyncio.run(_test())
 
 
+def cmd_notify(args):
+    """Send a test push to notify.whatsapp_number."""
+    from harvey.config import load_config, load_env
+    from harvey.integrations.evolution import EvolutionClient
+    from harvey.notify import owner_number
+
+    number = owner_number(load_config())
+    if not number:
+        print("\n  ✗ Set notify.whatsapp_number in harvey.yaml first.\n")
+        sys.exit(1)
+
+    async def _test():
+        result = await EvolutionClient.from_env(load_env()).send_text(
+            number, "Harvey: test push. Hot leads and anything that needs you will arrive here.")
+        print(f"\n  {'✓ Sent to ' + number if result.ok else '✗ ' + result.error}\n")
+        sys.exit(0 if result.ok else 1)
+    asyncio.run(_test())
+
+
 def cmd_lessons(args):
     """List, approve or reject the lessons Harvey proposed from corrections."""
     from harvey.state import StateManager
@@ -948,6 +967,11 @@ def main():
     sub.add_argument("whatsapp_action", choices=["test"],
                      help="test: verify the Evolution instance is connected")
     sub.set_defaults(func=cmd_whatsapp)
+
+    # harvey notify test
+    sub = subparsers.add_parser("notify", help="Pushes to your WhatsApp (notify.whatsapp_number)")
+    sub.add_argument("notify_action", choices=["test"], help="test: send a test push")
+    sub.set_defaults(func=cmd_notify)
 
     # harvey microsoft auth|test
     sub = subparsers.add_parser("microsoft", help="Microsoft 365 provider setup")

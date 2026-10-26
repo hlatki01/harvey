@@ -501,6 +501,13 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     """,
+    # ── v16: pushes sent to the owner's phone, one per key (harvey/notify.py) ──
+    """
+    CREATE TABLE IF NOT EXISTS push_log (
+        key TEXT PRIMARY KEY,
+        sent_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -1845,6 +1852,31 @@ class StateManager:
                 (_new_id(), text.strip(), evidence))
             await db.commit()
             return cursor.rowcount == 1
+
+    # ── Pushes to the owner's phone: each key goes out once ──
+
+    async def claim_push(self, key: str) -> bool:
+        """True for the one caller that may send this push; False if it was already claimed."""
+        async with self._connect() as db:
+            cursor = await db.execute("INSERT OR IGNORE INTO push_log (key) VALUES (?)", (key,))
+            await db.commit()
+            return cursor.rowcount == 1
+
+    async def release_push(self, key: str) -> None:
+        """The send failed: let the next attempt try again."""
+        async with self._connect() as db:
+            await db.execute("DELETE FROM push_log WHERE key = ?", (key,))
+            await db.commit()
+
+    async def get_handoffs(self) -> list[dict]:
+        """Conversations waiting on a human, with who they are with."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                    "SELECT c.id, c.thread_json, c.channel, p.first_name, p.last_name, p.company "
+                    "FROM conversations c LEFT JOIN prospects p ON p.id = c.prospect_id "
+                    "WHERE c.status = 'needs_human'") as cur:
+                return [dict(r) for r in await cur.fetchall()]
 
     # ── Notifications: what needs attention, one row per thing ──
 

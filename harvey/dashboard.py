@@ -2146,30 +2146,12 @@ async def _whatsapp_link_up() -> bool:
 
 
 async def _refresh_notifications(state) -> None:
-    raised: list[tuple] = []
+    from harvey.notify import state_alerts
+    raised = await state_alerts(state)
 
     async def raise_(key, title, detail="", tone="warn", tab="", target="", signature=""):
         raised.append((key, title, detail, tone, tab, target, signature))
 
-    for c in await query_db(
-            "SELECT c.id, c.thread_json, c.channel, p.first_name, p.last_name, p.company FROM conversations c "
-            "LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.status = 'needs_human'"):
-        try:
-            thread = json.loads(c["thread_json"] or "[]")
-        except (json.JSONDecodeError, TypeError):
-            thread = []
-        who = " ".join(x for x in (c["first_name"], c["last_name"]) if x) or c["company"] or "A lead"
-        last = next((m["content"] for m in reversed(thread) if m.get("sender") == "prospect"), "")
-        await raise_(f"handoff:{c['id']}", f"{who} needs you", last[:140] or "Harvey handed this conversation over.",
-                     "bad", "conversations", c["id"], str(len(thread)))
-    pending = await state.get_outbox(status="pending_review", limit=500)
-    if pending:
-        n = len(pending)
-        await raise_("approvals", f"{n} message{'s' if n != 1 else ''} waiting for approval",
-                     "Nothing goes out until you approve it.", "warn", "outbox", "", str(n))
-    paused = await state.get_setting("sending_paused")
-    if paused:
-        await raise_("system:paused", "Sending is paused", str(paused), "bad", "outbox")
     brain = await _brain_status()
     if brain.get("status") == "paused":
         await raise_("system:brain", "Harvey's model is paused",

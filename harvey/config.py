@@ -597,6 +597,46 @@ class AutoDiscoveryConfig(BaseModel):
         return v
 
 
+NOTIFY_EVENTS = ("hot_lead", "handoff", "approvals", "meeting", "system")
+
+
+class NotifyConfig(BaseModel):
+    """What needs you, pushed to one WhatsApp number through the Evolution
+    instance (.env: EVOLUTION_*). Empty number: nothing is pushed. Messages
+    from this number are never treated as a lead's."""
+
+    whatsapp_number: str = ""
+    events: list[str] = list(NOTIFY_EVENTS)
+    # A conversation entering one of these stages is a hot lead.
+    hot_stages: list[str] = ["engaged", "qualifying", "closing"]
+    # At most one "waiting for approval" push per this many minutes.
+    approvals_every_minutes: int = 60
+
+    @field_validator("events")
+    @classmethod
+    def _known_events(cls, v: list[str]) -> list[str]:
+        unknown = [e for e in v if e not in NOTIFY_EVENTS]
+        if unknown:
+            raise ValueError(f"unknown event(s) {unknown}; choose from {list(NOTIFY_EVENTS)}")
+        return v
+
+    @field_validator("hot_stages")
+    @classmethod
+    def _known_stages(cls, v: list[str]) -> list[str]:
+        from harvey.models.conversation import STAGES
+        unknown = [s for s in v if s not in STAGES]
+        if unknown:
+            raise ValueError(f"unknown stage(s) {unknown}; choose from {STAGES}")
+        return v
+
+    @field_validator("approvals_every_minutes")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be >= 1")
+        return v
+
+
 class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -608,6 +648,7 @@ class HarveyConfig(BaseModel):
     writer: WriterConfig = WriterConfig()
     dashboard: DashboardConfig = DashboardConfig()
     discovery: AutoDiscoveryConfig = AutoDiscoveryConfig()
+    notify: NotifyConfig = NotifyConfig()
 
 
 class EnvConfig(BaseModel):

@@ -10,6 +10,7 @@ from datetime import datetime, time, timedelta
 
 import pytz
 
+from harvey import notify
 from harvey.brain import Brain
 from harvey.config import (
     ConfigError, load_config, load_env, HarveyConfig, legacy_sending_held, sending_notice,
@@ -328,6 +329,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     f"Harvey is paused: {problem} Nothing was sent or changed. "
                     f"Re-checking in {config.usage.heartbeat_interval_minutes} minutes."
                 )
+                await notify.push(state, config, "system",
+                                  f"system:brain:{datetime.now().date().isoformat()}",
+                                  f"Harvey: the model is paused. {problem}")
                 if await _interruptible_sleep(interval, stop_event):
                     break
                 continue
@@ -415,6 +419,12 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     )
                 else:
                     await _run_agents([(name, run()) for name, run in send_tasks])
+
+            # Push what needs the owner (hand-offs, approvals, pauses) to their phone.
+            try:
+                await notify.push_alerts(state, config)
+            except Exception as e:
+                logger.warning(f"Failed to push alerts: {e}")
 
             # 6. Log the action (best-effort; never kills the loop)
             try:

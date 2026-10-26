@@ -20,6 +20,7 @@ from harvey.config import (
 )
 from harvey.decide import DEMO_TOKEN, Decision, apply_policy, find_demo, needs_review, parse_decision
 from harvey.gate import chat_brand
+from harvey import notify
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.evolution import EvolutionClient
@@ -506,6 +507,8 @@ class Handler:
             )
         if convo.stage != old_stage:
             logger.info(f"Handler: Stage for {lead_email}: {old_stage} -> {convo.stage}")
+            await notify.on_stage_change(self.state, self.config, prospect, convo, old_stage,
+                                         reply_text, self.whatsapp)
 
         if human_turn and intent in AUTO_REPLY_INTENTS:
             await self.state.log_action(
@@ -534,7 +537,7 @@ class Handler:
 
         if intent == "escalate":
             # Angry / legal / compliance replies go to a human. Never auto-reply.
-            await self.state.update_conversation(convo.id, status="needs_human")
+            await self._hand_over(prospect, convo, reply_text)
             await self.state.log_action(
                 action_type="escalation",
                 agent="handler",
@@ -570,7 +573,7 @@ class Handler:
 
         if held:
             # Instantly has no approval queue: a human answers this one.
-            await self.state.update_conversation(convo.id, status="needs_human")
+            await self._hand_over(prospect, convo, reply_text)
             await self.state.log_action(
                 action_type="escalation", agent="handler",
                 details={"prospect_email": lead_email, "reason": "instantly_approval_required",
@@ -594,7 +597,7 @@ class Handler:
         if not response:
             # No usable draft from a working provider: hand it to a human
             # rather than leave an answered-looking thread with no reply.
-            await self.state.update_conversation(convo.id, status="needs_human")
+            await self._hand_over(prospect, convo, reply_text)
             await self.state.log_action(
                 action_type="escalation",
                 agent="handler",
@@ -619,7 +622,7 @@ class Handler:
             if decision.action == "handoff":
                 # The knowledge base ran out, or they want a person: put the
                 # chat on the dashboard's "needs you" list and stop answering.
-                await self.state.update_conversation(convo.id, status="needs_human")
+                await self._hand_over(prospect, convo, reply_text)
                 await self.state.log_action(
                     action_type="handoff", agent="handler",
                     details={"prospect_phone": prospect.phone, "intent": intent,
@@ -831,6 +834,8 @@ class Handler:
         complete = True
         for msg in inbound:
             dedup_key = f"wa:{msg.provider_id}"
+            if notify.is_owner(self.config, msg.phone):
+                continue   # the owner answering a push is not a lead
             if await self.state.is_reply_processed(dedup_key):
                 continue
             consumed = True
@@ -857,6 +862,11 @@ class Handler:
         if handled:
             logger.info(f"Handler: processed {handled} WhatsApp message(s).")
         return complete
+
+    async def _hand_over(self, prospect, convo, reply_text: str):
+        """Put the conversation on the human's list, and tell them."""
+        await self.state.update_conversation(convo.id, status="needs_human")
+        await notify.push_handoff(self.state, self.config, prospect, convo, reply_text, self.whatsapp)
 
     async def _queue_whatsapp_reply(self, response: str, prospect, convo, intent: str,
                                     action: str = "", force_auto: bool = False):
