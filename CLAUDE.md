@@ -146,7 +146,7 @@ Ask the user these questions and build `harvey.yaml` and `skills/product_knowled
 
 ### Step 4: Confirm Signals
 
-Harvey ships a catalog of ~19 signals it knows how to collect, all **proposed** and
+Harvey ships a catalog of ~27 signals it knows how to collect, all **proposed** and
 none active. Nothing is prospected against until the user confirms them.
 
 Send them to `harvey dashboard` → **Signals**, where each one shows a

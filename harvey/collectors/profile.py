@@ -109,6 +109,43 @@ TEAM_PATHS = ("/team", "/about", "/about-us", "/our-team", "/staff",
               "/leadership", "/meet-the-team", "/company/team")
 CAREERS_PATHS = ("/careers", "/jobs", "/join-us", "/employment", "/hiring",
                  "/about/careers", "/careers/")
+# Brazilian sites print the CNPJ in the footer, or on these pages.
+CNPJ_PATHS = ("/contato", "/fale-conosco", "/sobre", "/quem-somos")
+CNPJ_SIGNALS = ("CNPJ", "CNPJ_PORTE", "CNAE", "COMPANY_AGE_YEARS")
+BRASILAPI_CNPJ = "https://brasilapi.com.br/api/cnpj/v1/"
+# "CNPJ: 12.345.678/0001-95". Letters are allowed: CNPJs issued from July 2026 are alphanumeric.
+CNPJ_RE = re.compile(
+    r"CNPJ(?:\s*N[º°O.]*)?[^0-9A-Z]{0,20}([0-9A-Z]{2}\.?[0-9A-Z]{3}\.?[0-9A-Z]{3}/?[0-9A-Z]{4}-?\d{2})")
+
+
+def _cnpj_digit(body: str) -> str:
+    weights = range(len(body) - 7, 1, -1)
+    total = sum((ord(c) - 48) * w for c, w in zip(body, [*weights, *range(9, 1, -1)]))
+    rest = total % 11
+    return "0" if rest < 2 else str(11 - rest)
+
+
+def valid_cnpj(cnpj: str) -> bool:
+    """Checks the two check digits (the same rule for numeric and alphanumeric CNPJs)."""
+    s = re.sub(r"[./-]", "", cnpj.upper())
+    if not re.fullmatch(r"[0-9A-Z]{12}\d{2}", s) or len(set(s)) == 1:
+        return False
+    first = _cnpj_digit(s[:12])
+    return s[12:] == first + _cnpj_digit(s[:12] + first)
+
+
+def find_cnpj(html: str) -> str:
+    """The first valid CNPJ printed on the page, as 14 characters, or ""."""
+    for m in CNPJ_RE.finditer(_text(html).upper()):
+        if valid_cnpj(m.group(1)):
+            return re.sub(r"[./-]", "", m.group(1))
+    return ""
+
+
+def format_cnpj(s: str) -> str:
+    return f"{s[:2]}.{s[2:5]}.{s[5:8]}/{s[8:12]}-{s[12:]}"
+
+
 CONTACT_PATHS = ("/contact", "/contact-us", "/get-a-quote", "/free-estimate",
                  "/request-estimate", "/quote")
 
@@ -278,6 +315,20 @@ class ProfileCollector:
             if html:
                 return base, html
         return "", ""
+
+    async def _get_json(self, url: str) -> dict | None:
+        try:
+            resp = await self._client.get(url)
+        except (httpx.HTTPError, ValueError) as e:
+            logger.debug(f"fetch failed {url}: {e}")
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
 
     async def _first_present(self, site: str, paths) -> tuple[str, str]:
         """Return (url, html) for the first path that returns content."""
@@ -489,7 +540,32 @@ class ProfileCollector:
                 for r in roles:
                     add("HIRING_ROLE", text=r, url=curl)
 
+        # CNPJ → the company's public registration (BrasilAPI, free)
+        if any(self.wants(c) for c in CNPJ_SIGNALS):
+            cnpj, curl = find_cnpj(home), site
+            if not cnpj:
+                curl, chtml = await self._first_present(site, CNPJ_PATHS)
+                cnpj = find_cnpj(chtml) if chtml else ""
+            if cnpj:
+                add("CNPJ", text=format_cnpj(cnpj), url=curl)
+            if cnpj and any(self.wants(c) for c in CNPJ_SIGNALS[1:]):
+                api = BRASILAPI_CNPJ + cnpj
+                reg = await self._get_json(api)
+                if reg:
+                    if reg.get("porte"):
+                        add("CNPJ_PORTE", text=str(reg["porte"]), url=api)
+                    if reg.get("cnae_fiscal"):
+                        add("CNAE", text=f"{reg['cnae_fiscal']} {reg.get('cnae_fiscal_descricao') or ''}".strip(),
+                            url=api)
+                    try:
+                        opened = datetime.strptime(str(reg.get("data_inicio_atividade")), "%Y-%m-%d").date()
+                        add("COMPANY_AGE_YEARS", num=(datetime.now(timezone.utc).date() - opened).days // 365,
+                            url=api)
+                    except ValueError:
+                        pass
+
         # team page → people
+
         if self.wants("CONTACT_FOUND") or self.wants("DECISION_MAKER_TITLE"):
             turl, thtml = await self._first_present(site, TEAM_PATHS)
             if thtml:

@@ -289,3 +289,63 @@ async def test_profile_uses_homepage_brand_over_service_location_title(
         await c.run([{"id": cid, "name": current, "domain": domain}])
     assert (await state.get_company_by_domain(domain)).name == brand
     assert (await state.get_prospect(pid)).company == brand
+
+
+# ── CNPJ (Brazil) ──
+
+
+def test_cnpj_check_digits_numeric_and_alphanumeric():
+    from harvey.collectors.profile import find_cnpj, valid_cnpj
+    assert valid_cnpj("11.222.333/0001-81")
+    assert not valid_cnpj("11.222.333/0001-82")
+    assert valid_cnpj("12.ABC.345/01DE-35")          # the Receita's alphanumeric example
+    assert not valid_cnpj("00.000.000/0000-00")
+    assert find_cnpj("<footer>Acme Ltda · CNPJ nº 11.222.333/0001-81</footer>") == "11222333000181"
+    assert find_cnpj("<p>Pedido 11.222.333/0001-81</p>") == ""   # not labelled as a CNPJ
+
+
+@pytest.mark.asyncio
+async def test_cnpj_from_the_contact_page_and_the_registry(state, monkeypatch):
+    await seed_signal_catalog(state)
+    c = collector({"CNPJ", "CNPJ_PORTE", "CNAE", "COMPANY_AGE_YEARS"})
+    c.state = state
+    asked = []
+
+    async def fake_resolve(self, domain):
+        return "https://acme.com.br", "<html><footer>Acme</footer></html>"
+
+    async def fake_first(self, site, paths):
+        return site + "/contato", "<p>Acme Ltda - CNPJ: 11.222.333/0001-81</p>"
+
+    async def fake_json(url):
+        asked.append(url)
+        return {"porte": "MICRO EMPRESA", "cnae_fiscal": 5611201,
+                "cnae_fiscal_descricao": "Restaurantes e similares",
+                "data_inicio_atividade": "2015-03-10"}
+
+    monkeypatch.setattr(ProfileCollector, "_resolve_site", fake_resolve)
+    monkeypatch.setattr(ProfileCollector, "_first_present", fake_first)
+    c._get_json = fake_json
+    obs = {o["signal_code"]: o for o in await c.profile_company("c1", "acme.com.br")}
+
+    assert obs["CNPJ"]["value_text"] == "11.222.333/0001-81"
+    assert obs["CNPJ"]["evidence_url"] == "https://acme.com.br/contato"
+    assert asked == ["https://brasilapi.com.br/api/cnpj/v1/11222333000181"]
+    assert obs["CNPJ_PORTE"]["value_text"] == "MICRO EMPRESA"
+    assert obs["CNAE"]["value_text"] == "5611201 Restaurantes e similares"
+    assert obs["COMPANY_AGE_YEARS"]["value_num"] >= 11
+
+
+@pytest.mark.asyncio
+async def test_only_the_cnpj_confirmed_means_no_registry_call(state, monkeypatch):
+    c = collector({"CNPJ"})
+
+    async def fake_resolve(self, domain):
+        return "https://acme.com.br", "<footer>CNPJ 11.222.333/0001-81</footer>"
+
+    async def never(url):
+        pytest.fail("called BrasilAPI without a registry signal confirmed")
+
+    monkeypatch.setattr(ProfileCollector, "_resolve_site", fake_resolve)
+    c._get_json = never
+    assert [o["signal_code"] for o in await c.profile_company("c1", "acme.com.br")] == ["CNPJ"]

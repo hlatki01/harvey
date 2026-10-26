@@ -209,6 +209,47 @@ SIGNAL_CATALOG: list[dict] = [
         "cost_note": "free (careers page)",
         "confidence_floor": 0.0,
     },
+    {
+        "code": "CNPJ",
+        "label": "CNPJ (Brazil)",
+        "description": "The company's Brazilian registration number, as printed on its site. Unlocks the registry signals below.",
+        "category": "profile",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (site footer or contact page)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "CNPJ_PORTE",
+        "label": "Company size in the registry (Brazil)",
+        "description": "Porte from the Receita Federal registry: micro empresa, pequeno porte or demais. Sizes a business without guessing.",
+        "category": "profile",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (BrasilAPI)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "CNAE",
+        "label": "Registered activity (Brazil)",
+        "description": "The main CNAE code and its description: what the business is registered to do.",
+        "category": "profile",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (BrasilAPI)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "COMPANY_AGE_YEARS",
+        "label": "Years since founding (Brazil)",
+        "description": "Years since the registry's start-of-activity date. A new business is still setting up; an old one has habits.",
+        "category": "profile",
+        "value_type": "num",
+        "collector": "profile",
+        "cost_note": "free (BrasilAPI)",
+        "confidence_floor": 0.0,
+    },
+
 
     # ── People: who decides ──
     {

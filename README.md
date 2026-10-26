@@ -155,11 +155,11 @@ harvey run
 
 This is the part that makes Harvey different from a black box, and it is deliberately not skippable.
 
-Harvey knows how to collect **23 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
+Harvey knows how to collect **27 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
 
 ```bash
 harvey signals                       # review the catalog
-harvey signals --confirm free        # everything that costs nothing (21 of them)
+harvey signals --confirm free        # everything that costs nothing (25 of them)
 harvey signals --confirm SERP_RANK   # a paid one, opted into explicitly
 ```
 
@@ -177,6 +177,8 @@ Every signal shows what it is in plain language, **what it costs**, and how many
 | | `NO_SCHEMA_MARKUP` | A concrete, checkable SEO gap you can name in an email. |
 | | `BLOG_STALE` | Content marketing started and abandoned. |
 | | `SITE_PAGE_COUNT`, `TECH_STACK`, `BLOCKS_AI_CRAWLERS`, `HIRING_ROLE` | Size, platform, AI-search visibility, and what they're hiring for. |
+| | `CNPJ`, `CNPJ_PORTE`, `CNAE`, `COMPANY_AGE_YEARS` | Brazil: the CNPJ printed on the site, then size, registered activity and age from the Receita Federal registry (free, via BrasilAPI). |
+
 | **People** | `CONTACT_FOUND`, `DECISION_MAKER_TITLE`, `LIKELY_OWNER`, `REGISTRY_VERIFIED` | Who decides, and whether they own the place. |
 | **Contact** | `EMAIL_PATTERN`, `EMAIL_STATUS`, `CONTACT_FORM_URL` | Whether you can actually reach them. |
 
