@@ -117,7 +117,11 @@ def pre_send_check(
 MAX_WHATSAPP_WORDS = 90
 BARE_DOMAIN_RE = re.compile(
     r"\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|me|io|app|dev|co|br|ai|site|online)\b", re.IGNORECASE)
+MEET_PREFIX = "https://meet.google.com/"
+
+
 def _link_key(url: str) -> str:
+
     return url.strip().rstrip(".,;:)!?/").lower()
 
 
@@ -184,7 +188,9 @@ def whatsapp_check(
         reasons.append(f"too many links ({len(links)} > {MAX_LINKS})")
     if allowed_links is not None:
         known = {_link_key(u) for u in allowed_links}
-        if any(_link_key(u) not in known for u in links):
+        # A Meet link only comes from an event Harvey booked (integrations/calendar.py).
+        if any(_link_key(u) not in known and not _link_key(u).startswith(MEET_PREFIX)
+               for u in links):
             reasons.append("link is not on the allowed list")
     # WhatsApp turns a bare address ("acme.me") into a link, which a link-free
     # opening must not contain. An extension named on its own (".com.br") is not one.

@@ -251,7 +251,7 @@ class GmailProvider(MailProvider):
         return False, "Token refresh or profile fetch failed"
 
 
-def run_auth_flow(client_id: str, client_secret: str) -> bool:
+def run_auth_flow(client_id: str, client_secret: str, scope: str = SCOPE) -> bool:
     """One-time OAuth (installed-app loopback). Blocks until the browser
     round-trip completes; stores the refresh token for GmailProvider."""
     import http.server
@@ -270,7 +270,7 @@ def run_auth_flow(client_id: str, client_secret: str) -> bool:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": SCOPE,
+        "scope": scope,
         "access_type": "offline",
         "prompt": "consent",
         "state": state,
@@ -330,7 +330,7 @@ def run_auth_flow(client_id: str, client_secret: str) -> bool:
         return False
     _save_token({
         "refresh_token": data["refresh_token"],
-        "scope": data.get("scope", SCOPE),
+        "scope": data.get("scope", scope),
         "obtained_at": int(time.time()),
     })
     print(f"  ✓ Gmail authorized. Token stored at {TOKEN_FILE}")

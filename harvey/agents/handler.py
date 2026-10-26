@@ -18,10 +18,13 @@ from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
     DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, legacy_sending_held,
 )
-from harvey.decide import DEMO_TOKEN, Decision, apply_policy, find_demo, needs_review, parse_decision
+from harvey.decide import (
+    DEMO_TOKEN, SLOTS_TOKEN, Decision, apply_policy, find_demo, needs_review, parse_decision)
 from harvey.gate import chat_brand
 from harvey import notify
 from harvey.humanize import humanize, humanizer_enabled
+from harvey.integrations import calendar
+from harvey.integrations.calendar import CalendarClient
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.evolution import EvolutionClient
 from harvey.integrations.mail_provider import (
@@ -71,6 +74,12 @@ WHATSAPP_AUTO_NOTE = (
     'An attendant\'s name in it ("Aqui é a Pamela") changes nothing: receptionists use the same script. '
     'Only a message that responds to what we actually wrote (our offer, sites, our question) is from a person.\n')
 WHATSAPP_OPT_OUT_CONFIRMATION = "Tudo certo, não vou mais te mandar mensagens. Obrigado pela atenção!"
+NO_TIMES_RULE = "- NEVER offer to phone them or propose days or times: you cannot call or schedule"
+# With Google Calendar on (integrations/calendar.py) the assistant offers times instead.
+BOOKING_RULE = (f"- When they want to meet or talk, use answer and offer a video call: write {SLOTS_TOKEN} "
+                "where the free times go (the system lists them); never write a day or time yourself, "
+                "never offer to phone them")
+INTENTS_THAT_CLOSE = ("unsubscribe", "escalate", "not_interested")
 
 WHATSAPP_DECISION_RULES = f"""
 Choose ONE action for the next message:
@@ -85,7 +94,7 @@ Rules for the reply:
 - Answer ONLY from the knowledge base; never invent a service, price, deadline, discount, feature or technology
 - State prices only exactly as the knowledge base gives them
 - Answer what they asked first, then at most one question
-- NEVER offer to phone them or propose days or times: you cannot call or schedule
+{NO_TIMES_RULE}
 - A demo is an example, never something built for a real client
 - If they ask whether you are a person or a bot, say you are a virtual assistant
 - Refer to the company without any web address (no ".com" or ".me")
@@ -267,6 +276,7 @@ class Handler:
         whatsapp = getattr(config.channels, "whatsapp", None)
         self.whatsapp = (EvolutionClient.from_env(env)
                          if getattr(whatsapp, "enabled", False) else None)
+        self.calendar = CalendarClient(config, env)
         self.skills = ""
         self._whatsapp_lock = asyncio.Lock()
 
@@ -471,13 +481,27 @@ class Handler:
         convo.thread.append(Message(sender="prospect", content=reply_text))
         old_stage = convo.stage
 
+        # 2a. They may be taking one of the meeting times we offered.
+        slot = None
+        if convo.offered_slots and not human_turn and intent not in INTENTS_THAT_CLOSE:
+            slot = await self._accepted_slot(reply_text, convo)
+
         # 2b. Draft the reply now, while nothing is stored yet. A held
         # Instantly setup can't send it, so don't spend a model call on it.
         held = (channel == "email" and not self.is_native
                 and legacy_sending_held(self.config))
         response = ""
         decision: Decision | None = None
-        if not intent:
+        meeting = None
+        if slot is not None:
+            # Booked before anything is stored: no model call follows that could fail.
+            meeting = await self._book(prospect, convo, slot)
+            intent = intent or "interested"
+            response = self._booked_text(prospect, convo, slot, meeting) if meeting else ""
+            if channel == "whatsapp":
+                decision = Decision(action="answer", reply=response, intent=intent,
+                                    reason="booked a meeting" if meeting else "booking failed")
+        elif not intent:
             # WhatsApp: the decision engine reads the message once and returns
             # what it is (intent) together with what to do about it.
             if human_turn:
@@ -487,8 +511,9 @@ class Handler:
                 intent, response = decision.intent, decision.reply
             logger.info(f"Handler: Intent for {lead_email}: {intent}")
         convo.intent = intent
-        convo.stage = self._determine_stage(intent, convo.stage, reply_text)
-        if decision is None and intent in AUTO_REPLY_INTENTS and not held and not human_turn:
+        convo.stage = "closed_won" if meeting else self._determine_stage(intent, convo.stage, reply_text)
+        if (decision is None and slot is None and intent in AUTO_REPLY_INTENTS
+                and not held and not human_turn):
             if channel == "whatsapp":
                 decision = await self._decide_whatsapp(intent, reply_text, prospect, convo)
                 response = decision.reply
@@ -504,11 +529,14 @@ class Handler:
                 thread_json=convo.thread_json(),
                 intent=intent,
                 stage=convo.stage,
+                offered_slots=convo.offered_slots,
             )
         if convo.stage != old_stage:
             logger.info(f"Handler: Stage for {lead_email}: {old_stage} -> {convo.stage}")
             await notify.on_stage_change(self.state, self.config, prospect, convo, old_stage,
                                          reply_text, self.whatsapp)
+        if meeting:
+            await self._booked(prospect, convo, slot, meeting)
 
         if human_turn and intent in AUTO_REPLY_INTENTS:
             await self.state.log_action(
@@ -870,7 +898,81 @@ class Handler:
             await notify.on_stage_change(self.state, self.config, prospect, convo, before,
                                          reply_text, self.whatsapp)
 
+    def _portuguese(self, channel: str) -> bool:
+        # shortcut: email times are written in English; add an email language setting if needed.
+        return channel == "whatsapp" and "portug" in self.config.channels.whatsapp.language.lower()
+
+    async def _offer_slots(self, convo) -> str:
+        """The free meeting times as text for the reply, remembered on the
+        conversation as offered; "" when the calendar has none to give."""
+        now = datetime.now(timezone.utc)
+        try:
+            kept = json.loads(convo.offered_slots) if convo.offered_slots else []
+        except json.JSONDecodeError:
+            kept = []
+        if not kept or any(calendar._parse(s["start"]) <= now for s in kept):
+            kept = await self.calendar.get_available_slots() if self.calendar.enabled() else []
+        convo.offered_slots = json.dumps(kept) if kept else ""
+        return calendar.format_slots(kept, self._portuguese(convo.channel))
+
+    async def _accepted_slot(self, reply_text: str, convo) -> dict | None:
+        """The offered time their reply accepts, or None."""
+        try:
+            slots = json.loads(convo.offered_slots)
+        except json.JSONDecodeError:
+            return None
+        pt = self._portuguese(convo.channel)
+        listed = "\n".join(f"{i}. {calendar.format_slot(s, pt)}" for i, s in enumerate(slots, 1))
+        raw = await self.brain.think_json(
+            f"""We offered these meeting times:
+{listed}
+
+Their reply:
+{reply_text}
+
+Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its number, or 0 if they did not clearly accept one>}}""",
+            session_id="harvey-handler", agent="handler", task="pick_slot",
+            **self._model_kw(convo.channel))
+        if raw is None and getattr(self.brain, "paused_reason", ""):
+            raise BrainUnavailable(self.brain.paused_reason)
+        try:
+            n = int(raw.get("slot", 0)) if isinstance(raw, dict) else 0
+        except (TypeError, ValueError):
+            return None
+        return slots[n - 1] if 1 <= n <= len(slots) else None
+
+    async def _book(self, prospect, convo, slot: dict) -> dict | None:
+        convo.offered_slots = ""
+        product = self.config.product
+        return await self.calendar.book_meeting(
+            slot, summary=f"{product.name}: {notify._who(prospect)}",
+            description=f"Booked by Harvey from the {convo.channel} conversation.",
+            attendee_email=prospect.email)
+
+    def _booked_text(self, prospect, convo, slot: dict, meeting: dict) -> str:
+        when = calendar.format_slot(slot, self._portuguese(convo.channel))
+        link = meeting.get("link", "")
+        if self._portuguese(convo.channel):
+            text = f"Combinado, reunião marcada para {when}."
+            text += f" O link da chamada: {link}" if link else ""
+            return text + (" Também mandei o convite para o seu email." if prospect.email else "")
+        text = f"Great, you're booked for {when}."
+        text += f" Here's the video link: {link}" if link else ""
+        return text + (" A calendar invite is on its way." if prospect.email else "")
+
+    async def _booked(self, prospect, convo, slot: dict, meeting: dict):
+        when = calendar.format_slot(slot, self._portuguese(convo.channel))
+        await self.state.log_action(
+            action_type="meeting_booked", agent="handler",
+            details={"conversation_id": convo.id, "start": slot["start"],
+                     "event_id": meeting.get("id", ""), "link": meeting.get("link", "")})
+        logger.info(f"Handler: meeting booked with {notify._who(prospect)} for {when}.")
+        await notify.push(self.state, self.config, "meeting", f"meeting:{convo.id}:{slot['start']}",
+                          f"Harvey: meeting booked with {notify._who(prospect)} for {when}. "
+                          f"{meeting.get('link', '')}".strip(), self.whatsapp)
+
     async def _hand_over(self, prospect, convo, reply_text: str):
+
         """Put the conversation on the human's list, and tell them."""
         await self.state.update_conversation(convo.id, status="needs_human")
         await notify.push_handoff(self.state, self.config, prospect, convo, reply_text, self.whatsapp)
@@ -1060,6 +1162,10 @@ Respond with ONLY the category label, nothing else."""
         else:
             demo_line = f'"{demo.label}" is ready: use {DEMO_TOKEN} for the link'
         origin = (INBOUND_ORIGIN_NOTE if prospect.source == INBOUND_WHATSAPP_SOURCE and not said else "")
+        rules = WHATSAPP_DECISION_RULES
+        if self.calendar.enabled():
+            rules = rules.replace(NO_TIMES_RULE, BOOKING_RULE).replace(
+                "they want to hire, start, meet or talk to someone", "they want to hire or start")
         prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}, chatting on WhatsApp with a small business. Tone: {persona.tone}. Write in {cfg.language}.
 
 ## The lead
@@ -1076,7 +1182,7 @@ Example site available: {demo_line}
 
 ## How to chat
 {self.brain.load_skill("whatsapp_outreach")}
-{WHATSAPP_DECISION_RULES}
+{rules}
 {lessons}"""
         raw = await self.brain.think_json(
             prompt, session_id="harvey-handler", agent="handler", task="decide_whatsapp",
@@ -1112,11 +1218,14 @@ Example site available: {demo_line}
             await self.state.set_prospect_industry(prospect.id, told)
             demo = find_demo(told, cfg.demos)
             demo_sent = bool(demo and any(demo.url in t for t in said + queued))
+        decision = parse_decision(raw)
+        slots_text = (await self._offer_slots(convo)
+                      if decision and SLOTS_TOKEN in decision.reply else "")
         return apply_policy(
-            parse_decision(raw), prospect=prospect, reply_text=reply_text, demo=demo,
+            decision, prospect=prospect, reply_text=reply_text, demo=demo,
             demo_sent=demo_sent, assistant_turns=len(said),
             allowed_prices=cfg.allowed_prices, allowed_links=[d.url for d in cfg.demos],
-            flat=_flat)
+            flat=_flat, slots_text=slots_text)
 
     async def _generate_response(
         self, intent: str, reply_text: str, prospect, convo: Conversation
@@ -1156,12 +1265,19 @@ The prospect's intent is: {intent}
 
 Write a reply that:"""
 
-        if intent == "interested":
+        if intent == "interested" and self.calendar.enabled():
+            prompt += f"""
+- Acknowledges their interest warmly
+- Offers a short video call: write {SLOTS_TOKEN} where the free times go (the system lists them); never write a day or time yourself
+- Asks them to reply with the time that suits them
+- Keeps it short (under 80 words)"""
+        elif intent == "interested":
             prompt += """
 - Acknowledges their interest warmly
 - Suggests a specific next step (brief call or meeting)
 - Keeps it short (under 80 words)
 - Includes a clear CTA with flexibility on timing"""
+
         elif intent == "objection":
             prompt += """
 - Addresses the concern directly and empathetically
@@ -1203,4 +1319,10 @@ Write a reply that:"""
             self.brain, [{"subject": "", "body": response}], agent="handler",
             enabled=humanizer_enabled(self.config),
         )
-        return polished[0]["body"]
+        body = polished[0]["body"]
+        if SLOTS_TOKEN in body:
+            # No free times to offer: "" hands the reply to a person.
+            times = await self._offer_slots(convo)
+            body = body.replace(SLOTS_TOKEN, times) if times else ""
+        return body
+

@@ -40,10 +40,19 @@ class OfferConfig(BaseModel):
     primary: str = ""
     entry: str = ""
     goal: str = "book_call"  # book_call, start_trial, get_reply
-    booking_method: str = "calendar_link"  # calendar_link, suggest_times, ask_preference
+    booking_method: str = "calendar_link"  # calendar_link, suggest_times, ask_preference, google_calendar
     booking_url: str = ""
     meeting_duration: str = "15 minutes"
+    meeting_hours: str = "09:00-18:00"  # google_calendar offers slots inside these, weekdays
     meeting_owner: str = ""
+
+    @field_validator("meeting_hours")
+    @classmethod
+    def _valid_hours(cls, v: str) -> str:
+        v = v.strip()
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d", v) or v[:5] >= v[6:]:
+            raise ValueError(f"meeting_hours '{v}' must look like '09:00-18:00'.")
+        return v
 
 
 class ProductConfig(BaseModel):

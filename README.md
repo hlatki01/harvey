@@ -411,6 +411,30 @@ Set `HARVEY_WEBHOOK_SECRET` in `.env` and every post is signed with `X-Harvey-Si
 
 A failed post is logged and not retried.
 
+### Meetings on your Google Calendar
+
+Harvey can book meetings on the Google Calendar of the account you authorized for Gmail. Turn it on in harvey.yaml:
+
+```yaml
+product:
+  offer:
+    booking_method: google_calendar
+    meeting_duration: "15 minutes"
+    meeting_hours: "09:00-18:00"   # weekdays, in usage.quiet_hours.timezone
+```
+
+Then run `harvey gmail auth` again so the token also covers your calendar. It needs `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` even when you send through another provider.
+
+How a booking happens:
+1. A lead wants to meet, on email or WhatsApp.
+2. Harvey offers the first free time on each of the next three working days. It reads them from your calendar's free/busy.
+3. The lead picks one.
+4. Harvey creates the event with a Meet link. On email, the lead is invited.
+5. Harvey replies with the time and the link.
+6. The conversation moves to `closed_won`, and a `meeting` push goes to your phone.
+
+The replies that offer times, and the confirmation, go through the usual approval queue.
+
 ---
 
 ## The dashboard
@@ -524,7 +548,7 @@ harvey export                # deliverable prospects → CSV
 harvey sending pause|resume  # kill switch
 harvey warmup [domain]       # is the sending domain ready? (SPF/DKIM/DMARC, age, blocklists)
 harvey retry-writes          # retry prospects the Writer gave up on
-harvey gmail auth            # one-time Gmail OAuth
+harvey gmail auth            # one-time Gmail OAuth (again after turning on google_calendar)
 harvey microsoft auth|test  # one-time Microsoft 365 sign-in (docs/microsoft365.md)
 ```
 
@@ -670,7 +694,7 @@ tests/                   # 242 tests
 
 **Done:** heartbeat loop · observation data model with governed vocabulary · user-confirmed signal catalog · cohort builder · discovery provider menu with cost estimates · free HTTP profiler with agency detection · pattern-first email finding with honest status · native mail providers (Gmail API, Microsoft 365 via Graph, SMTP+IMAP) · outbox approval ladder · deterministic pre-send gate · bounce detection and kill switch · reply handling with intent classification · subscription quota tracking · website trainer · web dashboard · CSV export
 
-**Next:** people enrichment from public registries · consent-gated voice callbacks · calendar integration for auto-booking · scheduled re-observation so signal *changes* trigger outreach · multi-product support
+**Next:** people enrichment from public registries · consent-gated voice callbacks · scheduled re-observation so signal *changes* trigger outreach · multi-product support
 
 > **On voice:** a fully autonomous AI cold dialer is not on this roadmap, and won't be. Under FCC 24-17 an AI-generated voice is an "artificial voice" under the TCPA, and 47 CFR 64.1200(a)(1) has no B2B exemption — penalties run $500–1,500 per call, uncapped, and some states ban it outright. Voice here will be **consent-gated**: inbound and opt-in-triggered callbacks only.
 

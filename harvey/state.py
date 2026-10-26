@@ -508,6 +508,10 @@ MIGRATIONS: list[str] = [
         sent_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     """,
+    # ── v17: meeting times offered in a conversation (JSON, integrations/calendar.py) ──
+    """
+    ALTER TABLE conversations ADD COLUMN offered_slots TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -533,7 +537,7 @@ _CAMPAIGN_COLUMNS = frozenset({
 })
 _CONVERSATION_COLUMNS = frozenset({
     "prospect_id", "campaign_id", "channel",
-    "thread_json", "intent", "stage", "status",
+    "thread_json", "intent", "stage", "status", "offered_slots",
 })
 
 
@@ -2365,12 +2369,12 @@ class StateManager:
             await db.execute(
                 """INSERT INTO conversations
                    (id, prospect_id, campaign_id, channel, thread_json,
-                    intent, stage, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    intent, stage, status, offered_slots, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     convo.id, convo.prospect_id, convo.campaign_id,
                     convo.channel, convo.thread_json(), convo.intent,
-                    convo.stage, convo.status, convo.created_at.isoformat(),
+                    convo.stage, convo.status, convo.offered_slots, convo.created_at.isoformat(),
                     convo.updated_at.isoformat(),
                 ),
             )

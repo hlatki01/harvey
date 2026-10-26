@@ -448,8 +448,12 @@ def cmd_gmail(args):
 
     env = load_env()
     if args.gmail_action == "auth":
-        from harvey.integrations.gmail import run_auth_flow
-        ok = run_auth_flow(env.gmail_client_id, env.gmail_client_secret)
+        from harvey.config import load_config
+        from harvey.integrations import calendar
+        from harvey.integrations.gmail import SCOPE, run_auth_flow
+        # Calendar access only when Harvey books meetings with it.
+        scope = SCOPE + " " + calendar.SCOPES if calendar.enabled(load_config()) else SCOPE
+        ok = run_auth_flow(env.gmail_client_id, env.gmail_client_secret, scope)
         sys.exit(0 if ok else 1)
 
     if args.gmail_action == "test":

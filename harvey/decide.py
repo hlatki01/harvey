@@ -26,6 +26,7 @@ logger = logging.getLogger("harvey.decide")
 INTENTS = ("interested", "objection", "not_interested", "unsubscribe", "escalate", "ooo", "wrong_person", "question")
 ACTIONS = ("answer", "qualify", "send_demo", "handoff", "wait")
 DEMO_TOKEN = "{demo_url}"
+SLOTS_TOKEN = "{slots}"     # where the free meeting times go (integrations/calendar.py)
 HANDOFF_REPLY = "Combinado! Nossa equipe vai falar com você por aqui mesmo, é só aguardar."
 HOLDING_REPLY = "Boa pergunta! Vou confirmar com a nossa equipe e já te respondo por aqui."
 
@@ -98,7 +99,8 @@ def _handoff(decision: Decision | None, why: str) -> Decision:
 
 
 def apply_policy(decision: Decision | None, *, prospect, reply_text: str, demo, demo_sent: bool,
-                 assistant_turns: int, allowed_prices, allowed_links, flat) -> Decision:
+                 assistant_turns: int, allowed_prices, allowed_links, flat,
+                 slots_text: str = "") -> Decision:
     """Check a proposed decision against the rules; return what Harvey does."""
     if decision is None:
         return _handoff(None, "the model gave no usable decision")
@@ -122,6 +124,11 @@ def apply_policy(decision: Decision | None, *, prospect, reply_text: str, demo, 
             reply = reply.replace(DEMO_TOKEN, demo.url)
     elif decision.action == "send_demo":
         return _handoff(decision, "send_demo without the demo link")
+    offers_times = SLOTS_TOKEN in reply
+    if offers_times:
+        if not slots_text:
+            return _handoff(decision, "no free meeting times to offer")
+        reply = reply.replace(SLOTS_TOKEN, slots_text)
     if not reply:
         return _handoff(decision, "empty reply")
     decision.reply = reply
@@ -131,7 +138,10 @@ def apply_policy(decision: Decision | None, *, prospect, reply_text: str, demo, 
     if not gate:
         return _handoff(decision, "gate: " + "; ".join(gate.reasons)[:200])
 
-    if decision.action != "handoff" and wants_a_human(reply_text, assistant_turns, flat):
+    # Offering meeting times is the answer to "vamos marcar", not a hand-over.
+    if (decision.action != "handoff" and not offers_times
+            and wants_a_human(reply_text, assistant_turns, flat)):
+
         decision.action = "handoff"
         decision.overridden = "asked for a person, or the chat is long"
     if decision.action == "handoff" and "?" in decision.reply:
