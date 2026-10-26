@@ -581,6 +581,22 @@ class DashboardConfig(BaseModel):
         return v
 
 
+class AutoDiscoveryConfig(BaseModel):
+    """Let the heartbeat find new businesses by itself, within a hard budget."""
+    enabled: bool = False        # explicit opt-in: discovery is the one stage that can spend money
+    provider: str = "osm"        # free by default; see `harvey discover --providers`
+    queries_per_run: int = 5     # industry x city queries each run takes, walking the whole list in turn
+    min_hours_between_runs: float = 6.0
+    max_spend_per_day: float = 0.0   # USD across all auto runs today; 0 = only free providers
+
+    @field_validator("queries_per_run")
+    @classmethod
+    def _at_least_one(cls, v):
+        if v < 1:
+            raise ValueError("discovery.queries_per_run must be at least 1")
+        return v
+
+
 class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -591,6 +607,7 @@ class HarveyConfig(BaseModel):
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
     dashboard: DashboardConfig = DashboardConfig()
+    discovery: AutoDiscoveryConfig = AutoDiscoveryConfig()
 
 
 class EnvConfig(BaseModel):

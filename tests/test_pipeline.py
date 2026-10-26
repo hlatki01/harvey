@@ -287,3 +287,38 @@ async def test_exclusions_also_read_the_value(state):
 
     # Only A actually lacks booking, so excluding it leaves B.
     assert await state.cohort(["NO_SCHEMA_MARKUP"], exclude=["NO_ONLINE_BOOKING"]) == [b]
+
+
+# ── Scheduled discovery ──
+
+
+@pytest.mark.asyncio
+async def test_auto_discovery_is_off_until_enabled_and_walks_the_query_list(state, config, monkeypatch):
+    calls = []
+
+    async def fake_run(st, cfg, provider, queries, max_spend=1.0, dry_run=False):
+        calls.append([q.keyword() for q in queries])
+        return D.DiscoveryReport(provider=provider, queries=len(queries))
+
+    monkeypatch.setattr(D, "run_discovery", fake_run)
+    config.icp.industries = ["a", "b", "c"]
+    config.icp.geography = ["X"]
+    config.discovery.enabled = False  # whatever harvey.local.yaml says
+    config.discovery.provider = "osm"
+
+    assert await P.run_auto_discovery(state, config) is None  # opt-in
+
+    config.discovery.enabled = True
+    config.discovery.queries_per_run = 2
+    config.discovery.min_hours_between_runs = 0.0001
+    assert await P.run_auto_discovery(state, config) is not None
+    await state.start_run("discover", provider="osm")  # a run is on record now
+    assert await P.run_auto_discovery(state, config) is None  # too soon after it
+    assert len(calls) == 1 and len(calls[0]) == 2
+
+    async with state._connect() as db:
+        await db.execute("DELETE FROM runs")
+        await db.commit()
+    await P.run_auto_discovery(state, config)
+    assert calls[1][0] != calls[0][0]  # the cursor moved on
+    assert len(calls[1]) == 2

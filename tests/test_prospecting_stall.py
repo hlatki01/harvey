@@ -128,3 +128,10 @@ async def test_a_summary_without_the_new_count_keeps_the_old_rule():
     # Callers that build their own summary (older tests, scripts) still work.
     summary = {"prospects": {"new": 3}, "draft_campaigns": 0, "open_conversations": 0}
     assert await decide_next_action(None, None, CONFIG, summary=summary) == "write_campaign"
+
+
+@pytest.mark.asyncio
+async def test_open_conversations_do_not_stop_prospecting():
+    # A WhatsApp thread waits days on the lead; replies are read alongside.
+    summary = {"prospects": {"new": 0}, "draft_campaigns": 0, "open_conversations": 5}
+    assert await decide_next_action(None, None, CONFIG, summary=summary) == "prospect"

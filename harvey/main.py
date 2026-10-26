@@ -15,7 +15,7 @@ from harvey.config import (
     ConfigError, load_config, load_env, HarveyConfig, legacy_sending_held, sending_notice,
     compliance_notice,
 )
-from harvey.pipeline import run_profile_stage
+from harvey.pipeline import run_auto_discovery, run_profile_stage
 from harvey.state import StateManager
 
 logging.basicConfig(
@@ -44,7 +44,7 @@ CYCLE_TIMEOUT_SECONDS = 600
 QUIET_HOURS_POLL_SECONDS = 300
 
 # Phase-1 tasks that read replies; sending waits for all of them to succeed.
-REPLY_READERS = ("handle_replies", "read_replies", "read_whatsapp")
+REPLY_READERS = ("read_replies", "read_whatsapp")
 
 
 def in_quiet_hours(config: HarveyConfig) -> bool:
@@ -119,10 +119,14 @@ async def decide_next_action(
 ) -> str:
     """Decide what Harvey should do next based on current state.
 
-    Uses deterministic priority rules (handle_replies > send_campaign >
-    write_campaign > prospect > idle) instead of burning a Claude call on a
+    Uses deterministic priority rules (send_campaign > write_campaign >
+    prospect > idle) instead of burning a Claude call on a
     decision that is fully derivable from pipeline counts. This saves budget
     every cycle and removes a fragile LLM string-parsing step.
+
+    Open conversations are not an action: the heartbeat reads replies
+    alongside whatever is chosen. A WhatsApp thread stays open for days
+    waiting on the lead, and winning the decision for it starved Scout.
     """
     if summary is None:
         summary = await state.get_state_summary()
@@ -131,15 +135,12 @@ async def decide_next_action(
     # guessed email stays 'new' for good, and counting it starved Scout.
     new_prospects, writable = _new_counts(summary)
     draft_campaigns = summary.get("draft_campaigns", 0) or 0
-    open_conversations = summary.get("open_conversations", 0) or 0
 
     # Held Instantly drafts can't deploy; choosing send_campaign for them
     # every cycle would starve the writer and scout forever.
     deployable = 0 if legacy_sending_held(config) else draft_campaigns
 
-    if open_conversations > 0:
-        action, reason = "handle_replies", f"{open_conversations} open conversation(s) waiting"
-    elif deployable > 0:
+    if deployable > 0:
         action, reason = "send_campaign", f"{draft_campaigns} draft campaign(s) ready to deploy"
     elif writable > 0:
         action, reason = "write_campaign", f"{writable} new prospect(s) with no drafts ready"
@@ -355,19 +356,12 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             tasks = []
             has_open_convos = summary.get("open_conversations", 0) > 0
 
-            if action == "handle_replies":
-                tasks.append(("handle_replies", handler.run()))
-            elif action == "prospect":
+            if action == "prospect":
                 tasks.append(("prospect", scout.run()))
-                # Also handle replies in parallel if needed
-                if has_open_convos:
-                    tasks.append(("handle_replies", handler.run()))
                 # Analyst is cheap (no Claude calls) — keep analytics fresh
                 tasks.append(("analyze", analyst.run()))
             elif action == "write_campaign":
                 tasks.append(("write_campaign", writer.run()))
-                if has_open_convos:
-                    tasks.append(("handle_replies", handler.run()))
             elif action == "idle":
                 tasks.append(("analyze", analyst.run()))
                 if whatsapp.is_active:
@@ -377,14 +371,14 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # finished: the handler's stop-on-reply must cancel follow-ups to
             # people who just replied before anything is sent. Native mail
             # providers drain the outbox every cycle, so their mailbox is
-            # read every cycle too (handle_replies above only runs when a
-            # conversation is already open).
+            # read every cycle too; other providers only while a
+            # conversation is open.
             send_tasks = []
             if action == "send_campaign":
                 send_tasks.append(("send_campaign", sender.run))
             elif sender.is_native:
                 send_tasks.append(("send_outbox", sender.run))
-            if sender.is_native and not any(n == "handle_replies" for n, _ in tasks):
+            if sender.is_native or has_open_convos:
                 tasks.append(("read_replies", handler.run()))
             if whatsapp.is_active:
                 tasks.append(("read_whatsapp", handler.run_whatsapp()))
@@ -396,6 +390,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # turns a name and a domain into something worth writing about.
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25)))
+
+            # New leads only once the last batch has been read, so the backlog
+            # never grows faster than profiling clears it.
+            if not summary.get("unprofiled", 0):
+                tasks.append(("discover", run_auto_discovery(state, config)))
 
             outcomes = await _run_agents(tasks)
 

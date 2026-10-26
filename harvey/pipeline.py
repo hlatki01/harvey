@@ -126,3 +126,46 @@ async def run_prospecting(
         report.errors.append(f"profile: {e}")
 
     return report
+
+
+async def run_auto_discovery(state, config) -> dict | None:
+    """One scheduled slice of discovery, or None when it isn't due.
+
+    Walks the (industry x city) list `queries_per_run` at a time, keeping its
+    place in settings so every cycle of the heartbeat can call this cheaply.
+    Spend is capped per day across runs; a paid provider with no budget is a no-op.
+    """
+    from datetime import datetime, timedelta, timezone
+    from harvey.collectors.discover import PROVIDERS, build_queries, run_discovery
+
+    cfg = config.discovery
+    if not cfg.enabled or cfg.provider not in PROVIDERS:
+        return None
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=cfg.min_hours_between_runs)).strftime("%Y-%m-%d %H:%M:%S")
+    async with state._connect() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM runs WHERE stage = 'discover' AND started_at >= ?", (since,)
+        ) as cur:
+            if (await cur.fetchone())[0]:
+                return None
+        async with db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM runs "
+            "WHERE stage = 'discover' AND date(started_at) = date('now')"
+        ) as cur:
+            spent = (await cur.fetchone())[0]
+
+    budget = cfg.max_spend_per_day - spent
+    all_queries = build_queries(config)
+    if not all_queries or (budget <= 0 and PROVIDERS[cfg.provider].estimate(all_queries[:1]) > 0):
+        return None
+
+    start = int(await state.get_setting("discovery_auto_cursor") or 0) % len(all_queries)
+    batch = [all_queries[(start + i) % len(all_queries)]
+             for i in range(min(cfg.queries_per_run, len(all_queries)))]
+    await state.set_setting("discovery_auto_cursor", str((start + len(batch)) % len(all_queries)))
+
+    report = await run_discovery(state, config, cfg.provider, batch, max_spend=max(budget, 0.0))
+    logger.info("Auto discovery: %d new companies from %d queries (%s)",
+                report.new_companies, report.queries, report.stopped or "done")
+    return report.as_dict()
