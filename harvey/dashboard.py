@@ -1332,6 +1332,14 @@ async def get_campaigns():
             f"WHERE id IN ({','.join('?' * len(ids))}) AND {'phone' if whatsapp else 'email'} != ''",
             tuple(ids),
         ) if ids else []
+        progress = {r["prospect_id"]: r for r in await query_db(
+            "SELECT prospect_id, SUM(status = 'sent') AS sent, COUNT(*) AS total, "
+            "MIN(CASE WHEN status IN ('pending_review', 'approved') THEN send_at END) AS next_at "
+            "FROM outbox WHERE campaign_id = ? AND kind = 'sequence' AND status != 'cancelled' "
+            "GROUP BY prospect_id", (row["id"],))}
+        for r in row["recipients"]:
+            p = progress.get(r["id"]) or {}
+            r["sent"], r["next_at"] = p.get("sent") or 0, p.get("next_at")
         row["send_as"] = send_as
         # A cold email sent by hand needs the same footer Harvey adds.
         row["footer"] = footer
@@ -1454,17 +1462,15 @@ _TIMELINE_ACTIONS = ("decision", "handoff", "escalation", "inbound_lead", "opt_o
                      "outbox_edited", "stage_whatsapp")
 
 
-@app.get("/api/conversations/{convo_id}/lead")
-async def conversation_lead(convo_id: str):
-    """Who this conversation is with: the lead, its company, the signals Harvey
-    found, and every contact so far (messages sent, decisions, handoffs)."""
+async def _lead_detail(prospect_id: str) -> dict | None:
+    """The lead, its company, the signals Harvey found, and every contact so
+    far (messages sent, decisions, handoffs), newest first. None if unknown."""
     rows = await query_db(
-        "SELECT c.id, c.prospect_id, c.channel, c.stage, c.intent, c.status, c.created_at, "
-        "p.first_name, p.last_name, p.email, p.phone, p.title, p.status AS pstatus, p.source, "
-        "p.score, p.industry, p.company, p.linkedin_url, p.company_id, p.created_at AS pcreated "
-        "FROM conversations c LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.id = ?", (convo_id,))
+        "SELECT id, first_name, last_name, email, phone, title, status AS pstatus, source, "
+        "score, industry, company, linkedin_url, company_id, personalization_notes, "
+        "created_at AS pcreated FROM prospects WHERE id = ?", (prospect_id,))
     if not rows:
-        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+        return None
     r = rows[0]
     state = _state()
     company, signals = None, []
@@ -1476,11 +1482,11 @@ async def conversation_lead(convo_id: str):
             labels = {c["code"]: c.get("label") or c["code"] for c in await state.get_signal_codes()}
             signals = [labels.get(code, code) for code in await state.company_signal_codes(comp.id)]
     keys = [k for k in (r.get("phone"), r.get("email")) if k]
-    events = [{"ts": r["created_at"], "type": "conversation", "text": f"Conversation started ({r['channel']})"}]
+    events = []
     for o in await query_db(
-            "SELECT created_at, sent_at, kind, status, channel, body FROM outbox WHERE prospect_id = ? ORDER BY created_at",
-            (r["prospect_id"],)):
-        what = "Opening message" if o["kind"] == "sequence" else "Reply"
+            "SELECT created_at, sent_at, kind, step, status, channel, body FROM outbox "
+            "WHERE prospect_id = ? ORDER BY created_at", (prospect_id,)):
+        what = ("Opening message" if o["step"] == 1 else f"Follow-up {o['step'] - 1}")             if o["kind"] == "sequence" else "Reply"
         events.append({"ts": o["sent_at"] or o["created_at"], "type": "message",
                        "text": f"{what} ({o['channel'] or 'email'}) · {o['status']}: " + (o["body"] or "")[:140]})
     for key in keys:
@@ -1495,14 +1501,68 @@ async def conversation_lead(convo_id: str):
             extra = f" ({d['action']})" if a["action_type"] == "decision" and d.get("action") else ""
             events.append({"ts": a["created_at"], "type": a["action_type"],
                            "text": a["action_type"].replace("_", " ").capitalize() + extra + (f": {detail}"[:160] if detail else "")})
-    events = list({(e["ts"], e["type"], e["text"]): e for e in events}.values())
-    events.sort(key=lambda e: str(e["ts"] or ""), reverse=True)
     return {
         "lead": {k: r.get(k) for k in ("first_name", "last_name", "phone", "email", "title", "pstatus",
-                                        "source", "score", "industry", "company", "linkedin_url", "pcreated")},
-        "conversation": {k: r.get(k) for k in ("stage", "intent", "status", "created_at")},
-        "company": company, "signals": signals, "history": events[:80],
+                                        "source", "score", "industry", "company", "linkedin_url", "pcreated",
+                                        "personalization_notes")},
+        "company": company, "signals": signals, "history": events,
     }
+
+
+def _newest_first(events: list[dict]) -> list[dict]:
+    events = list({(e["ts"], e["type"], e["text"]): e for e in events}.values())
+    events.sort(key=lambda e: str(e["ts"] or ""), reverse=True)
+    return events[:80]
+
+
+@app.get("/api/conversations/{convo_id}/lead")
+async def conversation_lead(convo_id: str):
+    """Who this conversation is with, and every contact so far."""
+    rows = await query_db(
+        "SELECT prospect_id, channel, stage, intent, status, created_at FROM conversations WHERE id = ?",
+        (convo_id,))
+    if not rows:
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    c = rows[0]
+    detail = await _lead_detail(c["prospect_id"]) or {
+        "lead": {}, "company": None, "signals": [], "history": []}
+    detail["history"] = _newest_first(detail["history"] + [
+        {"ts": c["created_at"], "type": "conversation", "text": f"Conversation started ({c['channel']})"}])
+    detail["conversation"] = {k: c.get(k) for k in ("stage", "intent", "status", "created_at")}
+    return detail
+
+
+@app.get("/api/campaigns/{campaign_id}/prospects/{prospect_id}")
+async def campaign_prospect(campaign_id: str, prospect_id: str):
+    """One person in a campaign: who they are, every message both ways
+    (the campaign's steps, sent or scheduled, their replies and Harvey's
+    answers), and the timeline of everything that happened."""
+    detail = await _lead_detail(prospect_id)
+    if detail is None:
+        return JSONResponse({"success": False, "message": "No such prospect."}, status_code=404)
+    messages = []
+    for o in await query_db(
+            "SELECT id, kind, step, status, subject, body, send_at, sent_at, error, created_at FROM outbox "
+            "WHERE prospect_id = ? AND (campaign_id = ? OR kind = 'reply') AND status != 'cancelled' "
+            "ORDER BY created_at", (prospect_id, campaign_id)):
+        messages.append({"who": "harvey", "ts": o["sent_at"] or o["send_at"] or o["created_at"], **o})
+    convos = await query_db(
+        "SELECT thread_json, created_at FROM conversations WHERE prospect_id = ?", (prospect_id,))
+    for c in convos:
+        try:
+            thread = json.loads(c.get("thread_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            thread = []
+        for m in thread if isinstance(thread, list) else []:
+            if not isinstance(m, dict) or m.get("sender") == "harvey":
+                continue  # Harvey's answers are already here from the Outbox
+            messages.append({"who": "lead" if m.get("sender") == "prospect" else "team",
+                             "ts": m.get("timestamp"), "body": m.get("content") or "", "status": "received"})
+        detail["history"].append({"ts": c["created_at"], "type": "conversation", "text": "Replied: conversation started"})
+    messages.sort(key=lambda m: str(m.get("ts") or ""))
+    detail["history"] = _newest_first(detail["history"])
+    detail["messages"] = messages
+    return detail
 
 
 @app.get("/api/conversations/{convo_id}/chat")

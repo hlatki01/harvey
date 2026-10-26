@@ -17,7 +17,7 @@ from harvey.gate import whatsapp_check
 from harvey.integrations.evolution import EvolutionClient, WhatsAppInbound
 from harvey.integrations.mail_provider import SendResult
 from harvey.models.company import Company
-from harvey.models.conversation import Conversation
+from harvey.models.conversation import Conversation, Message
 from harvey.models.prospect import COMPANY_PHONE_SOURCE, Prospect
 from harvey.phone import looks_like_mobile, normalize_phone
 from harvey.signals import seed_signal_catalog
@@ -832,6 +832,37 @@ def test_desk_lists_whatsapp_drafts_next_to_email(desk):
     asyncio.run(_seed_draft(desk.db_path))
     pending = desk.get("/api/outbox").json()["pending"]
     assert [p["to_email"] for p in pending] == ["5511987654321"]
+
+
+def test_campaign_page_shows_a_persons_messages_both_ways_and_timeline(desk):
+    import asyncio
+
+    async def seed():
+        state = StateManager(str(desk.db_path))
+        await state.init_db()
+        await _company(state)
+        client = FakeEvolution({"5511987654321": "5511987654321"})
+        sender = _sender(state, client, require_approval=False)
+        await sender._stage()
+        await sender._drain()
+        await sender._campaigns()
+        [campaign] = await state.get_campaigns_by_status("active")
+        pid = campaign.prospect_ids[0]
+        await state.add_conversation(Conversation(
+            id="", prospect_id=pid, channel="whatsapp",
+            thread=[Message(sender="prospect", content="Quanto custa?")]))
+        return campaign.id, pid
+
+    cid, pid = asyncio.run(seed())
+    [row] = [c for c in desk.get("/api/campaigns").json() if c["id"] == cid]
+    [r] = row["recipients"]
+    assert r["phone"] == "5511987654321" and r["sent"] == 1 and not r["can_mark_sent"]
+    d = desk.get(f"/api/campaigns/{cid}/prospects/{pid}").json()
+    assert [(m["who"], m.get("step"), m["status"]) for m in d["messages"]] == [
+        ("harvey", 1, "sent"), ("lead", None, "received"), ("harvey", 2, "approved"), ("harvey", 3, "approved")]
+    assert d["lead"]["company"] == "Oficina do Zé" and d["company"]["name"] == "Oficina do Zé"
+    assert any("Follow-up 1" in e["text"] for e in d["history"])
+    assert desk.get(f"/api/campaigns/{cid}/prospects/nope").status_code == 404
 
 
 def test_desk_edit_uses_the_whatsapp_gate(desk):
