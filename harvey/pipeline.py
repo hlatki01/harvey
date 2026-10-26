@@ -60,12 +60,14 @@ async def run_profile_stage(
     state,
     limit: int = 100,
     stale_days: int = PROFILE_STALE_DAYS,
+    triggers=None,
 ) -> tuple[int, int, str]:
     """Profile whatever currently needs it.
 
     Returns (companies, observations, run_id). Free — three HTTP requests per
     business, no browser, no model call — so it is safe to run on every
-    heartbeat without touching the Claude budget.
+    heartbeat without touching the Claude budget. With a TriggersConfig, a
+    re-read that changed one of its signals boosts that company's prospects.
     """
     from harvey.collectors.profile import profile_companies
 
@@ -76,7 +78,49 @@ async def run_profile_stage(
 
     logger.info("profile: %d companies need a look", len(pending))
     observations, run_id = await profile_companies(state, pending)
+    if triggers is not None and triggers.signals:
+        await apply_triggers(state, run_id, triggers)
     return len(pending), observations, run_id
+
+
+def configured_triggers():
+    """harvey.yaml's triggers, or None when there is no usable config."""
+    from harvey.config import ConfigError, load_config
+    try:
+        return load_config().triggers
+    except (ConfigError, ValueError):
+        return None
+
+
+def _shown(value: str, value_type: str) -> str:
+
+    if value_type == "bool":
+        return {"1": "yes", "0": "no"}.get(value, value)
+    return value or "nothing"
+
+
+async def apply_triggers(state, run_id: str, triggers) -> int:
+    """Boost the prospects of every company whose trigger signals changed in
+    this run. Returns how many prospects were boosted."""
+    from harvey.signals import SIGNAL_CATALOG
+
+    catalog = {s["code"]: s for s in SIGNAL_CATALOG}
+    boosted = 0
+    for change in await state.signal_changes(run_id, triggers.signals):
+        sig = catalog[change["signal_code"]]
+        new = ", ".join(_shown(v, sig["value_type"]) for v in change["new"])
+        old = ", ".join(_shown(v, sig["value_type"]) for v in change["old"])
+        note = f"New since our last look: {sig['label']}: {new} (was {old})."
+        n = await state.boost_new_prospects(change["company_id"], triggers.score_boost, note)
+        boosted += n
+        await state.log_action(
+            action_type="signal_changed", agent="profile",
+            details={"company_id": change["company_id"], "signal": change["signal_code"],
+                     "old": change["old"], "new": change["new"], "prospects_boosted": n})
+        logger.info(f"profile: {change['company_id']} {change['signal_code']} {old} -> {new} "
+                    f"({n} prospect(s) boosted)")
+    return boosted
+
 
 
 async def run_prospecting(
@@ -117,7 +161,8 @@ async def run_prospecting(
     # have been interrupted, and observations go stale on a schedule.
     try:
         companies, observations, run_id = await run_profile_stage(
-            state, limit=profile_limit)
+            state, limit=profile_limit, triggers=getattr(config, "triggers", None))
+
         report.profiled_companies = companies
         report.profile_observations = observations
         report.profile_run_id = run_id

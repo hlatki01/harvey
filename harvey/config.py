@@ -662,6 +662,33 @@ class CrmConfig(BaseModel):
         return v
 
 
+class TriggersConfig(BaseModel):
+    """Signals whose change makes a company worth contacting now. When a
+    re-read of its site finds a new value for one of these, its not-yet-
+    contacted prospects gain score_boost points and a note the Writer uses."""
+
+    signals: list[str] = []      # e.g. [RUNNING_GOOGLE_ADS, HIRING_ROLE, INCUMBENT_AGENCY]
+    refresh_days: int = 90       # re-read each site this often
+    score_boost: int = 20
+
+    @field_validator("signals")
+    @classmethod
+    def _known(cls, v: list[str]) -> list[str]:
+        from harvey.signals import SIGNAL_CATALOG
+        known = {s["code"] for s in SIGNAL_CATALOG if s["collector"] == "profile"}
+        unknown = sorted(set(v) - known)
+        if unknown:
+            raise ValueError(f"not a profile signal: {unknown}. Use: {sorted(known)}")
+        return v
+
+    @field_validator("refresh_days", "score_boost")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be >= 1")
+        return v
+
+
 class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -675,6 +702,8 @@ class HarveyConfig(BaseModel):
     discovery: AutoDiscoveryConfig = AutoDiscoveryConfig()
     notify: NotifyConfig = NotifyConfig()
     crm: CrmConfig = CrmConfig()
+    triggers: TriggersConfig = TriggersConfig()
+
 
 
 class EnvConfig(BaseModel):

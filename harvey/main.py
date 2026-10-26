@@ -392,12 +392,18 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # business with no model call, so it costs nothing against the
             # Claude budget the rest of this loop is rationing — and it is what
             # turns a name and a domain into something worth writing about.
-            if summary.get("unprofiled", 0):
-                tasks.append(("profile", run_profile_stage(state, limit=25)))
+            triggers = getattr(config, "triggers", None)
+            unprofiled = (await state.count_companies_needing_profile(triggers.refresh_days)
+                          if triggers else summary.get("unprofiled", 0))
+            if unprofiled:
+                tasks.append(("profile", run_profile_stage(
+                    state, limit=25, triggers=triggers,
+                    **({"stale_days": triggers.refresh_days} if triggers else {}))))
 
             # New leads only once the last batch has been read, so the backlog
             # never grows faster than profiling clears it.
-            if not summary.get("unprofiled", 0):
+            if not unprofiled:
+
                 tasks.append(("discover", run_auto_discovery(state, config)))
 
             outcomes = await _run_agents(tasks)

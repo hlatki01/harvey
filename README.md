@@ -193,7 +193,21 @@ Has a marketing agency  AND  running Google Ads  AND NOT  already has online boo
 
 That is a campaign with a reason behind it. You know exactly why each of those 23 is on the list, and so does the email Harvey writes them.
 
+### When a signal changes
+
+Harvey re-reads each site every `refresh_days`. A change in some signals means the company is worth contacting now: it started running ads, opened a role, or changed agencies. Name those signals in harvey.yaml:
+
+```yaml
+triggers:
+  signals: [RUNNING_GOOGLE_ADS, HIRING_ROLE, INCUMBENT_AGENCY]
+  refresh_days: 30     # default 90
+  score_boost: 20
+```
+
+When a re-read finds a new value for one of them, the company's prospects that have not been contacted yet gain `score_boost` points, up to 100. They also get a note the Writer uses, for example "New since our last look: Running Google Ads: yes (was no)". The first reading of a site never counts as a change.
+
 ---
+
 
 ## The prospecting pipeline
 

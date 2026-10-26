@@ -565,7 +565,6 @@ class ProfileCollector:
                         pass
 
         # team page → people
-
         if self.wants("CONTACT_FOUND") or self.wants("DECISION_MAKER_TITLE"):
             turl, thtml = await self._first_present(site, TEAM_PATHS)
             if thtml:

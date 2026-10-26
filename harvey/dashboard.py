@@ -1866,7 +1866,7 @@ async def start_profile():
         return JSONResponse({"success": False, "message": "a run is already going"},
                             status_code=409)
     try:
-        from harvey.pipeline import run_profile_stage
+        from harvey.pipeline import configured_triggers, run_profile_stage
 
         state = _state()
         await state.init_db()
@@ -1877,7 +1877,9 @@ async def start_profile():
         async def _go():
             global _discovery_report
             try:
-                companies, observations, _ = await run_profile_stage(state, limit=200)
+                companies, observations, _ = await run_profile_stage(
+                    state, limit=200, triggers=configured_triggers())
+
                 _discovery_report = {
                     "profiled_companies": companies,
                     "profile_observations": observations,

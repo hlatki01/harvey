@@ -1469,9 +1469,62 @@ class StateManager:
             await db.commit()
         return len(payload)
 
+    async def signal_changes(self, run_id: str, codes) -> list[dict]:
+        """Values this run saw that the company's previous reading of the same
+        signal did not: [{company_id, signal_code, old, new}].
+
+        A run is compared with the one before it for that company and signal,
+        in insertion order (rowid), so readings in the same second still
+        order. A first reading is not a change.
+        """
+        codes = list(codes)
+        if not run_id or not codes:
+            return []
+        marks = ",".join("?" * len(codes))
+        async with self._connect() as db:
+            async with db.execute(
+                f"""SELECT company_id, signal_code, run_id, value_num, value_text
+                   FROM observations
+                   WHERE signal_code IN ({marks}) AND run_id != ''
+                     AND company_id IN (SELECT company_id FROM observations WHERE run_id = ?)
+                   ORDER BY rowid""",
+                (*codes, run_id),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        readings: dict[tuple, dict[str, set]] = {}    # (company, code) -> run -> values
+        for company_id, code, run, num, text in rows:
+            value = text or ("" if num is None else f"{num:g}")
+            readings.setdefault((company_id, code), {}).setdefault(run, set()).add(value)
+        changes = []
+        for (company_id, code), runs in readings.items():
+            order = list(runs)
+            if run_id not in runs or order.index(run_id) == 0:
+                continue
+            old, new = runs[order[order.index(run_id) - 1]], runs[run_id]
+            if new - old:
+                changes.append({"company_id": company_id, "signal_code": code,
+                                "old": sorted(old), "new": sorted(new - old)})
+        return changes
+
+    async def boost_new_prospects(self, company_id: str, points: int, note: str) -> int:
+        """Raise the score of a company's not-yet-contacted prospects and add
+        a note the Writer reads. Returns how many were changed."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """UPDATE prospects
+                   SET score = MIN(100, COALESCE(score, 0) + ?),
+                       personalization_notes = TRIM(COALESCE(personalization_notes, '') || ' ' || ?),
+                       updated_at = ?
+                   WHERE company_id = ? AND status = 'new'""",
+                (int(points), note, _utcnow().isoformat(), company_id),
+            )
+            await db.commit()
+            return cursor.rowcount
+
     async def get_observations(
         self,
         company_id: str = "",
+
         signal_code: str = "",
         latest_only: bool = False,
         limit: int = 500,

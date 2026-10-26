@@ -592,7 +592,7 @@ def cmd_outbox(args):
 def cmd_profile(args):
     """Read what companies' own websites say about them. Free, no Claude calls."""
     from harvey.state import StateManager
-    from harvey.pipeline import run_profile_stage
+    from harvey.pipeline import configured_triggers, run_profile_stage
 
     async def _profile():
         state = StateManager()
@@ -607,7 +607,8 @@ def cmd_profile(args):
         print(f"\n  {pending} companies need profiling. Reading up to "
               f"{args.limit}...\n")
         companies, observations, _ = await run_profile_stage(
-            state, limit=args.limit, stale_days=args.stale_days)
+            state, limit=args.limit, stale_days=args.stale_days, triggers=configured_triggers())
+
         print(f"  Read {companies} sites → {observations} observations (free)")
         print("\n  See what turned up: harvey dashboard → Signals\n")
 
