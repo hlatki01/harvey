@@ -300,3 +300,10 @@ async def test_inbox_sequence_with_company_only_is_kept():
     ]
     out = await sequence_writer(steps)._write_sequence([inbox(industry="Roofing")])
     assert [s.body for s in out] == ["Hi there, who answers at {{company}}?"]
+
+
+@pytest.mark.asyncio
+async def test_finds_a_brazilian_inbox_on_the_contato_page():
+    pages = {"https://acme.com": "<p>Oficina</p>",
+             "https://acme.com/contato": '<a href="mailto:contato@acme.com">Fale conosco</a>'}
+    assert await make_scout(pages)._find_inbox_address("acme.com") == "contato@acme.com"

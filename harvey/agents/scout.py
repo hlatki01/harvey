@@ -63,10 +63,13 @@ MAX_COMPANIES_PER_CYCLE = 10
 # only mailboxes it will use, most likely read by the owner first. An
 # allowlist, not a blocklist: a personal address (jane.doe@) on a contact
 # page is a person Harvey chose not to target, never "the team".
-INBOX_PAGES = ("/contact", "/contact-us")
+# English and Brazilian Portuguese: most small businesses here are one or the other.
+INBOX_PAGES = ("/contact", "/contact-us", "/contato", "/fale-conosco")
 INBOX_PREFERRED = ("owner", "office", "info", "contact", "contactus", "hello",
                    "team", "service", "sales", "estimates", "quotes",
-                   "inquiries", "enquiries", "admin", "support")
+                   "inquiries", "enquiries", "admin", "support",
+                   "contato", "faleconosco", "atendimento", "comercial",
+                   "vendas", "orcamento", "orcamentos", "sac")
 INBOX_ADDRESS = re.compile(r"[a-z0-9._+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
 MAX_PROSPECTS_PER_CYCLE = 25
 
