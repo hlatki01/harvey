@@ -2,12 +2,31 @@
 
 import json
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 
+from harvey.models.campaign import SUBJECT_STYLES
 from harvey.state import StateManager
 
 logger = logging.getLogger("harvey.analyst")
+
+MIN_SENDS_PER_VARIANT = 30
+Z_95 = 1.96   # two-sided 95%
+
+
+def subject_winner(stats: dict) -> tuple[str, float, float] | None:
+    """(winner, its reply rate, the other's) once both variants have enough
+    sends and the gap is significant (two-proportion z-test), else None."""
+    a, b = stats.get("A"), stats.get("B")
+    if not a or not b or min(a["sent"], b["sent"]) < MIN_SENDS_PER_VARIANT:
+        return None
+    ra, rb = a["replied"] / a["sent"], b["replied"] / b["sent"]
+    pooled = (a["replied"] + b["replied"]) / (a["sent"] + b["sent"])
+    se = math.sqrt(pooled * (1 - pooled) * (1 / a["sent"] + 1 / b["sent"]))
+    if se == 0 or abs(ra - rb) / se < Z_95:
+        return None
+    return ("A", ra, rb) if ra > rb else ("B", rb, ra)
 
 
 class Analyst:
@@ -34,6 +53,8 @@ class Analyst:
 
         # Generate insights
         report["insights"] = self._generate_insights(report)
+        report["subject_test"] = await self.state.get_variant_stats()
+        await self._subject_lesson(report)
 
         # Write report atomically (temp file + rename) so a crash mid-write
         # never leaves a corrupt analytics.json for the dashboard to choke on.
@@ -62,7 +83,24 @@ class Analyst:
         for insight in report["insights"]:
             logger.info(f"Analyst: Insight — {insight}")
 
+    async def _subject_lesson(self, report: dict):
+        """Propose the email 1 subject test's winner as a lesson (once: the
+        text is fixed, so re-proposing it is a no-op). A person approves it."""
+        found = subject_winner(report["subject_test"])
+        if not found:
+            return
+        winner, won, lost = found
+        loser = "B" if winner == "A" else "A"
+        text = (f"Email 1 subjects that {SUBJECT_STYLES[winner]} get more replies than ones "
+                f"that {SUBJECT_STYLES[loser]}: write them that way.")
+        evidence = (f"A/B test: {won:.0%} vs {lost:.0%} replies over "
+                    f"{sum(v['sent'] for v in report['subject_test'].values())} first emails")
+        report["insights"].append(f"TEST: {text} ({evidence}).")
+        if await self.state.add_lesson(text, evidence):
+            logger.info(f"Analyst: subject test has a winner ({winner}); lesson proposed.")
+
     async def _pipeline_summary(self) -> dict:
+
         """Count prospects by status."""
         return await self.state.count_prospects_by_status()
 

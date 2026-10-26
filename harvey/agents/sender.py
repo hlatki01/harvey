@@ -25,6 +25,8 @@ from harvey.gate import pre_send_check
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
 from harvey.integrations.precleared import PreclearedClient
+from harvey.models.campaign import pick_subject
+
 from harvey.state import (
     HAND_SENT_REASON, MANUAL_SEND_KEY, MAYBE_SENT_PREFIX, StateManager,
 )
@@ -459,17 +461,20 @@ class Sender:
             for step in campaign.sequence:
                 cumulative_days += max(0, step.delay_days)
                 send_at = now + timedelta(days=cumulative_days)
+                subject, variant = pick_subject(step.subject, step.subject_b, prospect.id)
                 item_id = await self.state.add_outbox_item(
                     prospect_id=prospect.id,
                     campaign_id=campaign.id,
                     step=step.step,
                     to_email=email,
-                    subject=self._render(step.subject, prospect),
+                    subject=self._render(subject, prospect),
                     body=self._render(step.body, prospect),
                     send_at=send_at.isoformat(),
                     status=initial_status,
                     provider=self.provider.name,
+                    variant=variant,
                 )
+
                 if item_id:
                     staged += 1
             # Conditional: never overwrite a status set while staging

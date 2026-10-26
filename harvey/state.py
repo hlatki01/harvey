@@ -512,6 +512,10 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE conversations ADD COLUMN offered_slots TEXT NOT NULL DEFAULT '';
     """,
+    # ── v18: which email 1 subject (A/B, models/campaign.py) an outbox item carries ──
+    """
+    ALTER TABLE outbox ADD COLUMN variant TEXT NOT NULL DEFAULT '';
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -998,6 +1002,7 @@ class StateManager:
         thread_ref: str = "",
         in_reply_to: str = "",
         channel: str = "email",
+        variant: str = "",
     ) -> str | None:
         """Queue one outgoing message (email, or WhatsApp with channel=). Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard."""
@@ -1007,12 +1012,12 @@ class StateManager:
                 """INSERT OR IGNORE INTO outbox
                    (id, campaign_id, prospect_id, conversation_id, step, kind,
                     to_email, subject, body, status, send_at, provider,
-                    thread_ref, in_reply_to, channel)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    thread_ref, in_reply_to, channel, variant)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item_id, campaign_id, prospect_id, conversation_id,
                     int(step), kind, _norm(to_email), subject, body,
-                    status, send_at, provider, thread_ref, in_reply_to, channel,
+                    status, send_at, provider, thread_ref, in_reply_to, channel, variant,
                 ),
             )
             await db.commit()
@@ -1901,7 +1906,23 @@ class StateManager:
 
     # ── Lessons ──
 
+    async def get_variant_stats(self) -> dict:
+        """Email 1 subject test: {"A"|"B": {"sent", "replied"}}. A prospect
+        replied when any conversation with them exists."""
+        async with self._connect() as db:
+            async with db.execute(
+                """SELECT o.variant, COUNT(*),
+                          SUM(EXISTS(SELECT 1 FROM conversations c WHERE c.prospect_id = o.prospect_id))
+                   FROM outbox o
+                   WHERE o.variant != '' AND o.status = 'sent' AND o.step = 1
+                     AND o.kind = 'sequence' AND o.channel = 'email'
+                   GROUP BY o.variant""",
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return {v: {"sent": sent, "replied": replied or 0} for v, sent, replied in rows}
+
     async def add_lesson(self, text: str, evidence: str = "") -> bool:
+
         """Store a proposed lesson; False if the same text already exists."""
         async with self._connect() as db:
             cursor = await db.execute(

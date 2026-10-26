@@ -18,7 +18,7 @@ from harvey.brain import Brain
 from harvey.config import HarveyConfig
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
-from harvey.models.campaign import Campaign, EmailStep
+from harvey.models.campaign import SUBJECT_STYLES, Campaign, EmailStep, pick_subject
 from harvey.state import WRITABLE_EMAIL_STATUSES, StateManager
 
 logger = logging.getLogger("harvey.writer")
@@ -209,17 +209,20 @@ class Writer:
         )
 
         drafted = 0
-        for (prospect, _), draft in zip(pending, polished):
+        for (prospect, original), draft in zip(pending, polished):
+            # The Humanizer rewrites subject and body only; subject_b is the original's.
+            subject, variant = pick_subject(draft["subject"], original.get("subject_b", ""), prospect.id)
             item_id = await self.state.add_outbox_item(
                 prospect_id=prospect.id,
                 campaign_id=campaign_id,
                 step=1,
                 to_email=prospect.email,
-                subject=draft["subject"],
+                subject=subject,
                 body=draft["body"],
                 send_at=now,
                 status=status,
                 provider=provider,
+                variant=variant,
             )
             if item_id:
                 drafted += 1
@@ -315,11 +318,12 @@ Requirements:
 - Under 75 words. One specific observation from the FACTS above, one
   question. No pitch, no product name.
 - Write the actual text (no merge variables — you know their name/company).
-- Subject: lowercase, 2-5 words.
+- Two subjects for an A/B test, both lowercase, 2-5 words: "subject" {SUBJECT_STYLES["A"]};
+  "subject_b" {SUBJECT_STYLES["B"]}.
 - No postal address, unsubscribe or opt-out line: Harvey adds them when it sends.
 - Follow every STRICT EMAIL RULE above.
 
-Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
+Return ONLY JSON: {{"subject": "...", "subject_b": "...", "body": "..."}}"""
 
         result = await self.brain.think_json(
             prompt, session_id="harvey-writer",
@@ -331,7 +335,8 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
         body = str(result.get("body") or "").strip()
         if not subject or not body:
             return None
-        return {"subject": subject[:120], "body": body[:2000]}
+        return {"subject": subject[:120], "body": body[:2000],
+                "subject_b": str(result.get("subject_b") or "").strip()[:120]}
 
     async def _write_sequence(self, prospects: list) -> list[EmailStep]:
         """Ask the brain to write a 3-email sequence."""
@@ -395,12 +400,13 @@ Requirements:
 {merge_rule}
 - Never be pushy or salesy. Be consultative and value-driven.
 - Subject lines: lowercase, 2-5 words.
+- Email 1 has two subjects for an A/B test: "subject" {SUBJECT_STYLES["A"]}; "subject_b" {SUBJECT_STYLES["B"]}.
 - No postal address, unsubscribe or opt-out line: Harvey adds them when it sends.
 - Follow every rule in the STRICT EMAIL RULES above. No exceptions.
 
 Return ONLY a JSON array (no markdown fences, no commentary):
 [
-  {{"step": 1, "subject": "...", "body": "...", "delay_days": 0}},
+  {{"step": 1, "subject": "...", "subject_b": "...", "body": "...", "delay_days": 0}},
   {{"step": 2, "subject": "...", "body": "...", "delay_days": 3}},
   {{"step": 3, "subject": "...", "body": "...", "delay_days": 4}}
 ]"""
@@ -466,7 +472,9 @@ Return ONLY a JSON array (no markdown fences, no commentary):
                         subject=subject,
                         body=body,
                         delay_days=delay,
+                        subject_b=str(raw.get("subject_b") or "").strip() if not steps else "",
                     )
+
                 )
             except Exception as e:
                 logger.warning(f"Writer: Skipping invalid step {i + 1}: {e}")

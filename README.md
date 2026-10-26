@@ -361,7 +361,16 @@ or SMTP for the approval queue. Set `require_approval: false` explicitly to use
 Instantly's automatic sending. This does not pause campaigns already running
 on Instantly; manage those in Instantly itself.
 
+### The first subject is an A/B test
+
+Every Email 1 is written with two subjects:
+- A names one specific thing about the prospect.
+- B is a short question.
+
+Each prospect gets one of them, fixed by their id, and the outbox records which one. Once both have at least 30 sent first emails and the reply rates differ significantly (95%), the Analyst proposes the winning style as a lesson. Nothing changes until you approve it on the dashboard or with `harvey lessons`. Legacy Instantly campaigns always use A.
+
 ---
+
 
 ## WhatsApp
 
