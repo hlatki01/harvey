@@ -11,6 +11,7 @@ import logging
 import time
 from datetime import date
 
+from harvey import crm
 from harvey.config import NotifyConfig, load_env
 from harvey.integrations.evolution import EvolutionClient
 from harvey.phone import normalize_phone
@@ -72,8 +73,11 @@ async def push(state, config, event: str, key: str, text: str, client=None) -> b
 
 async def on_stage_change(state, config, prospect, convo, old_stage: str, reply_text: str,
                           client=None) -> None:
-    """A conversation moved stage: a hot one is worth a push."""
-    if convo.stage == old_stage or convo.stage not in _settings(config).hot_stages:
+    """A conversation moved stage: tell the CRM webhook, and push a hot one."""
+    if convo.stage == old_stage:
+        return
+    await crm.post_stage_change(config, prospect, convo, old_stage, reply_text)
+    if convo.stage not in _settings(config).hot_stages:
         return
     await push(state, config, "hot_lead", f"hot:{convo.id}:{convo.stage}",
                f"Harvey: hot lead, {_who(prospect)} is now {convo.stage} ({convo.channel}).\n"

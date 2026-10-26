@@ -392,6 +392,25 @@ harvey notify test               # sends a test push to that number
 - Pushes ignore quiet hours.
 - If the Evolution instance itself is down, no push can reach you; the dashboard still shows it.
 
+### Stage changes to your CRM
+
+Harvey can POST each conversation's stage change, as JSON, to a URL you choose. The receiver can be n8n, Make, Zapier or a CRM's own webhook.
+
+```yaml
+crm:
+  webhook_url: "https://your-n8n.example.com/webhook/harvey"
+```
+
+The body has these fields:
+- `event`, `at`
+- `conversation_id`, `channel`, `old_stage`, `new_stage`, `intent`
+- `last_reply`
+- `prospect`: name, email, phone, title, company
+
+Set `HARVEY_WEBHOOK_SECRET` in `.env` and every post is signed with `X-Harvey-Signature: sha256=<HMAC-SHA256 of the body>`; check it on the receiving side.
+
+A failed post is logged and not retried.
+
 ---
 
 ## The dashboard

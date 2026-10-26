@@ -637,6 +637,22 @@ class NotifyConfig(BaseModel):
         return v
 
 
+class CrmConfig(BaseModel):
+    """Every conversation stage change, POSTed as JSON to a URL you choose
+    (n8n, Make, Zapier, your CRM). .env HARVEY_WEBHOOK_SECRET, when set,
+    signs the body: X-Harvey-Signature: sha256=<hmac>."""
+
+    webhook_url: str = ""
+
+    @field_validator("webhook_url")
+    @classmethod
+    def _http_url(cls, v: str) -> str:
+        v = v.strip()
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("must start with http:// or https://")
+        return v
+
+
 class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -649,6 +665,7 @@ class HarveyConfig(BaseModel):
     dashboard: DashboardConfig = DashboardConfig()
     discovery: AutoDiscoveryConfig = AutoDiscoveryConfig()
     notify: NotifyConfig = NotifyConfig()
+    crm: CrmConfig = CrmConfig()
 
 
 class EnvConfig(BaseModel):
@@ -684,6 +701,7 @@ class EnvConfig(BaseModel):
     m365_tenant_id: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
+    harvey_webhook_secret: str = ""   # signs crm.webhook_url posts
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -799,6 +817,7 @@ def load_env() -> EnvConfig:
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
+        harvey_webhook_secret=os.getenv("HARVEY_WEBHOOK_SECRET", "").strip(),
     )
     return env
 

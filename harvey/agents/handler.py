@@ -520,7 +520,7 @@ class Handler:
         # 3. Route based on intent
         if intent == "unsubscribe":
             # Honor opt-outs ALWAYS. No reply, no future contact.
-            await self.state.update_conversation(convo.id, status="closed", stage="closed_lost")
+            await self._close_lost(prospect, convo, reply_text)
             await self.state.update_prospect_status(prospect.id, "opted_out")
             await self.state.log_action(
                 action_type="opt_out",
@@ -552,7 +552,7 @@ class Handler:
             return
 
         if intent == "not_interested":
-            await self.state.update_conversation(convo.id, status="closed", stage="closed_lost")
+            await self._close_lost(prospect, convo, reply_text)
             await self.state.update_prospect_status(prospect.id, "lost")
             logger.info(f"Handler: {lead_email} not interested. Closing. One no is enough.")
             return
@@ -862,6 +862,13 @@ class Handler:
         if handled:
             logger.info(f"Handler: processed {handled} WhatsApp message(s).")
         return complete
+
+    async def _close_lost(self, prospect, convo, reply_text: str):
+        await self.state.update_conversation(convo.id, status="closed", stage="closed_lost")
+        if convo.stage != "closed_lost":    # else the stage change was already reported
+            before, convo.stage = convo.stage, "closed_lost"
+            await notify.on_stage_change(self.state, self.config, prospect, convo, before,
+                                         reply_text, self.whatsapp)
 
     async def _hand_over(self, prospect, convo, reply_text: str):
         """Put the conversation on the human's list, and tell them."""
