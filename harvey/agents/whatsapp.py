@@ -2,8 +2,7 @@
 
 Same approval ladder as email: every message becomes an outbox row
 (channel='whatsapp') that waits for a human unless require_approval is off.
-Unlike email there is no campaign: the target is a business's own listed
-phone, so each cycle this agent
+The target is a business's own listed phone, so each cycle this agent
 
   1. picks businesses with a phone that were never tried (optionally only
      those carrying chosen signals, e.g. NO_WEBSITE),
@@ -11,24 +10,31 @@ phone, so each cycle this agent
      'company_phone' prospect either way so it is never retried,
   3. has the model write ONE short opening message grounded in what Harvey
      observed, and stages it,
-  4. sends whatever is approved and due, a few at a time with long, random
-     gaps between messages.
+  4. puts every opening in a campaign, like email: one 3-message sequence
+     per kind of business, whose follow-ups 2 and 3 are staged behind the
+     opening (openings sent before campaigns existed are adopted too),
+  5. sends whatever is approved and due, a few at a time with long, random
+     gaps between messages, each follow-up only after the one before it.
 
 Replies are read by the Handler (run_whatsapp), which also cancels anything
 still queued for someone who answered.
 """
 
 import asyncio
+import json
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from harvey.agents.sender import follow_up_order
+from harvey.agents.writer import Writer
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import HarveyConfig
 from harvey.decide import find_demo
 from harvey.site_probe import find_own_site
 from harvey.gate import chat_brand, whatsapp_check
 from harvey.integrations.evolution import EvolutionClient
+from harvey.models.campaign import Campaign
 from harvey.models.prospect import COMPANY_PHONE_SOURCE, Prospect
 from harvey.phone import looks_like_mobile, normalize_phone
 from harvey.state import StateManager
@@ -42,6 +48,8 @@ MAX_SENDS_PER_CYCLE = 4
 SEND_JITTER_SECONDS = (45, 150)
 STOP_STATUSES = {"replied", "opted_out", "lost", "meeting", "closed"}
 SENDABLE_STATUSES = {"new", "queued"}
+# Who still gets follow-ups when an opening joins a campaign.
+FOLLOW_UP_STATUSES = {"new", "queued", "contacted"}
 
 # What each signal means for a message, in plain words the model may use.
 SIGNAL_FACTS = {
@@ -83,6 +91,7 @@ class WhatsAppSender:
         self.skills = self.brain.load_skills_for_agent("whatsapp") + await self.state.lessons_block()
         try:
             await self._stage()
+            await self._campaigns()
         except BrainUnavailable as e:
             logger.error(f"WhatsApp: staging stopped; the model is unavailable ({e}).")
         except Exception as e:
@@ -92,9 +101,12 @@ class WhatsAppSender:
     # ── staging ──────────────────────────────────────────────────────
 
     async def _queued_count(self) -> int:
+        # Due now only: follow-ups scheduled for later days don't take today's room.
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         n = 0
         for status in ("pending_review", "approved"):
-            n += len(await self.state.get_outbox(status=status, channel="whatsapp", limit=500))
+            n += len(await self.state.get_outbox(
+                status=status, channel="whatsapp", due_before=now, limit=500))
         return n
 
     async def _stage(self):
@@ -208,6 +220,105 @@ Write ONLY the message text."""
             return ""
         return f"{text}\n\n{self.cfg.opt_out_line}".strip()
 
+    # ── campaigns ────────────────────────────────────────────────────
+
+    async def _campaigns(self):
+        """Put every opening into a campaign, as the Writer does for email:
+        one sequence per kind of business, its follow-ups staged behind the
+        opening. Openings left out (written before campaigns, or the sequence
+        couldn't be written yet) are picked up on a later cycle."""
+        openers = await self.state.get_whatsapp_openers_without_campaign()
+        if not openers:
+            return
+        campaigns = {c.name: c for c in await self.state.get_campaigns_by_status("active")
+                     if c.channel == "whatsapp"}
+        unwritten: set[str] = set()
+        for item in openers:
+            prospect = await self.state.get_prospect(item["prospect_id"])
+            if prospect is None:
+                continue
+            name = f"{prospect.industry or 'general'}-whatsapp"
+            campaign = campaigns.get(name)
+            if campaign is None:
+                if name in unwritten:
+                    continue
+                sequence = await self._write_sequence(prospect)
+                if not sequence:
+                    paused = getattr(self.brain, "paused_reason", "")
+                    if paused:
+                        raise BrainUnavailable(paused)
+                    logger.warning(f"WhatsApp: could not write a sequence for '{name}'.")
+                    unwritten.add(name)
+                    continue
+                campaign = Campaign(id="", name=name, channel="whatsapp",
+                                    sequence=sequence, status="active")
+                await self.state.add_campaign(campaign)
+                campaigns[name] = campaign
+                await self.state.log_action(
+                    action_type="write_campaign", agent="whatsapp",
+                    details={"campaign_id": campaign.id, "campaign_name": name,
+                             "steps": len(sequence), "channel": "whatsapp"})
+            # Follow-ups first: if this stops half-way, the opening is still
+            # unassigned and the next cycle redoes it (the slots can't double).
+            if prospect.status in FOLLOW_UP_STATUSES:
+                await self._stage_follow_ups(campaign, prospect, item)
+            if prospect.id not in campaign.prospect_ids:
+                campaign.prospect_ids.append(prospect.id)
+                await self.state.update_campaign(
+                    campaign.id, prospect_ids_json=json.dumps(campaign.prospect_ids))
+            await self.state.update_outbox_item(item["id"], campaign_id=campaign.id)
+
+    async def _stage_follow_ups(self, campaign: Campaign, prospect, opener: dict):
+        try:
+            base = datetime.fromisoformat(str(opener.get("sent_at")))
+        except (TypeError, ValueError):
+            base = datetime.now(timezone.utc).replace(tzinfo=None)
+        status = "pending_review" if self.cfg.require_approval else "approved"
+        days = 0
+        for step in campaign.sequence[1:]:
+            days += max(0, step.delay_days)
+            body = step.body.replace("{{company}}", prospect.company).replace(
+                "{{ company }}", prospect.company).strip()
+            await self.state.add_outbox_item(
+                prospect_id=prospect.id, campaign_id=campaign.id, step=step.step,
+                to_email=opener["to_email"], subject=WHATSAPP_SUBJECT,
+                body=f"{body}\n\n{self.cfg.opt_out_line}".strip(),
+                send_at=(base + timedelta(days=days)).isoformat(),
+                status=status, provider=self.client.name, channel="whatsapp",
+            )
+
+    async def _write_sequence(self, prospect) -> list:
+        """The campaign's 3 messages. Message 1 is only the campaign's
+        template: each business's real opening is written for it alone."""
+        persona, product = self.config.persona, self.config.product
+        prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}. Tone: {persona.tone}.
+You sell: {product.name} - {product.description}
+
+Write a 3-message WhatsApp sequence, in {self.cfg.language}, for small businesses like this one:
+Type: {prospect.industry or "unknown"}
+
+- Message 1: who you are + one easy yes/no question. At most 45 words.
+- Message 2: 3 days later, if they didn't answer. A different angle, one concrete example. At most 35 words.
+- Message 3: 4 days after that. A short, gracious last message. At most 25 words.
+- Use {{{{company}}}} for the business's name; no other merge variables.
+- Plain text, no links, no markdown, no emojis, no prices, no meetings.
+- Sound like a person typing on a phone. Never mention a city or region.
+- Do not add an opt-out line; the system adds it.
+{self.skills}
+
+Return ONLY a JSON array:
+[{{"step": 1, "body": "...", "delay_days": 0}},
+ {{"step": 2, "body": "...", "delay_days": 3}},
+ {{"step": 3, "body": "...", "delay_days": 4}}]"""
+        result = await self.brain.think_json(
+            prompt, session_id="harvey-whatsapp", agent="whatsapp", task="write_sequence")
+        if isinstance(result, list):
+            for raw in result:
+                if isinstance(raw, dict):
+                    raw["subject"] = WHATSAPP_SUBJECT
+        steps = Writer._parse_sequence(result)
+        return steps if len(steps) >= 2 else []
+
     # ── sending ──────────────────────────────────────────────────────
 
     async def _blocked(self, item: dict, prospect) -> tuple[str, str] | None:
@@ -253,7 +364,8 @@ Write ONLY the message text."""
             return
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         due = await self.state.get_outbox(
-            status="approved", due_before=now, limit=budget * 3, channel="whatsapp")
+            status="approved", due_before=now, limit=budget * 3, channel="whatsapp",
+            skip_unready_follow_ups=True)
         if replies_only:
             due = [i for i in due if i["kind"] == "reply"]
         sent = 0
@@ -264,6 +376,12 @@ Write ONLY the message text."""
             blocked = await self._blocked(item, prospect)
             if blocked:
                 await self.state.update_outbox_item(item["id"], status=blocked[0], error=blocked[1])
+                continue
+            order = await follow_up_order(self.state, item)
+            if order == "wait":
+                continue
+            if order:
+                await self.state.update_outbox_item(item["id"], status=order[0], error=order[1])
                 continue
             # Claim it: a reply may have cancelled it since the queue was read.
             if not await self.state.claim_outbox_item(item["id"]):

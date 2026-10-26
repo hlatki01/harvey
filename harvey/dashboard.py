@@ -1325,10 +1325,11 @@ async def get_campaigns():
             row["prospect_ids"] = []
         # Who each draft goes to, so the UI can open it in the user's own mail client.
         ids = row["prospect_ids"]
+        whatsapp = row.get("channel") == "whatsapp"
         row["recipients"] = await query_db(
-            f"SELECT id, email, first_name, last_name, company, title, status, email_status, "
+            f"SELECT id, email, phone, first_name, last_name, company, title, status, email_status, "
             f"source, personalization_notes FROM prospects "
-            f"WHERE id IN ({','.join('?' * len(ids))}) AND email != ''",
+            f"WHERE id IN ({','.join('?' * len(ids))}) AND {'phone' if whatsapp else 'email'} != ''",
             tuple(ids),
         ) if ids else []
         row["send_as"] = send_as
@@ -1337,8 +1338,9 @@ async def get_campaigns():
         for r in row["recipients"]:
             r["sent_by_hand"] = r["id"] in hand_sent
             # "I already emailed them": always recordable before Harvey commits.
+            # WhatsApp is only ever sent by Harvey: no "sent by hand" for it.
             r["can_mark_sent"] = (
-                r["id"] not in hand_sent and r["id"] not in committed
+                not whatsapp and r["id"] not in hand_sent and r["id"] not in committed
                 and (r.get("status") or "new") in HAND_SENDABLE_STATUSES
             )
             # The Gmail button: only when Harvey can't send itself.

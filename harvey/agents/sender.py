@@ -59,6 +59,47 @@ SENDABLE_EMAIL_STATUSES = {"verified"}
 SENDABLE_EMAIL_STATUSES_WITH_RISKY = {"verified", "risky"}
 
 
+async def follow_up_order(state, item: dict) -> str | tuple[str, str] | None:
+    """For a follow-up: "wait" until the email before it went out and its
+    gap has passed, (status, error) when that email never will, else None.
+
+    Without this, a step held for any reason (approval, a pause, a
+    compliance hold, the warmup ramp) lets its follow-ups' scheduled
+    times arrive first: a late "Approve all" sent the whole sequence in
+    one go, or step 2 before step 1.
+    """
+    if item["kind"] != "sequence" or int(item["step"]) <= 1:
+        return None
+    prev = await state.get_previous_step(item)
+    if prev is None:
+        return None
+    if prev["status"] in ("pending_review", "approved", "sending"):
+        return "wait"
+    if prev["status"] != "sent":
+        return "cancelled", f"step {prev['step']} wasn't sent ({prev['status']})"
+
+    def _at(value):
+        try:
+            return datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+    sent_at = _at(prev["sent_at"])
+    if sent_at is None:
+        return None
+    delay = await state.get_step_delay_days(item.get("campaign_id"), item["step"])
+    if delay is None:  # campaign unknown: fall back to the planned spacing
+        planned, prev_planned = _at(item["send_at"]), _at(prev["send_at"])
+        gap = (planned - prev_planned) if planned and prev_planned else MIN_FOLLOW_UP_GAP
+    else:
+        gap = timedelta(days=delay)
+    ready_at = sent_at + max(MIN_FOLLOW_UP_GAP, gap)
+    if datetime.now(timezone.utc).replace(tzinfo=None) >= ready_at:
+        return None
+    # Reschedule it for then, so it leaves the due queue until it's ready.
+    await state.update_outbox_item(item["id"], send_at=ready_at.isoformat())
+    return "wait"
+
+
 class Sender:
     def __init__(
         self,
@@ -469,46 +510,6 @@ class Sender:
             return self._with_footer(item["body"])
         return item["body"]
 
-    async def _follow_up_order(self, item: dict) -> str | tuple[str, str] | None:
-        """For a follow-up: "wait" until the email before it went out and its
-        gap has passed, (status, error) when that email never will, else None.
-
-        Without this, a step held for any reason (approval, a pause, a
-        compliance hold, the warmup ramp) lets its follow-ups' scheduled
-        times arrive first: a late "Approve all" sent the whole sequence in
-        one go, or step 2 before step 1.
-        """
-        if item["kind"] != "sequence" or int(item["step"]) <= 1:
-            return None
-        prev = await self.state.get_previous_step(item)
-        if prev is None:
-            return None
-        if prev["status"] in ("pending_review", "approved", "sending"):
-            return "wait"
-        if prev["status"] != "sent":
-            return "cancelled", f"step {prev['step']} wasn't sent ({prev['status']})"
-
-        def _at(value):
-            try:
-                return datetime.fromisoformat(str(value))
-            except (TypeError, ValueError):
-                return None
-        sent_at = _at(prev["sent_at"])
-        if sent_at is None:
-            return None
-        delay = await self.state.get_step_delay_days(item.get("campaign_id"), item["step"])
-        if delay is None:  # campaign unknown: fall back to the planned spacing
-            planned, prev_planned = _at(item["send_at"]), _at(prev["send_at"])
-            gap = (planned - prev_planned) if planned and prev_planned else MIN_FOLLOW_UP_GAP
-        else:
-            gap = timedelta(days=delay)
-        ready_at = sent_at + max(MIN_FOLLOW_UP_GAP, gap)
-        if datetime.now(timezone.utc).replace(tzinfo=None) >= ready_at:
-            return None
-        # Reschedule it for then, so it leaves the due queue until it's ready.
-        await self.state.update_outbox_item(item["id"], send_at=ready_at.isoformat())
-        return "wait"
-
     async def _blocked(self, item: dict, prospect, allow_risky: bool) -> tuple[str, str] | None:
         """Why this email must not go out, as (status, error), or None."""
         if prospect is None:
@@ -607,7 +608,7 @@ class Sender:
                 await self.state.update_outbox_item(
                     item["id"], status=blocked[0], error=blocked[1])
                 continue
-            order = await self._follow_up_order(item)
+            order = await follow_up_order(self.state, item)
             if order == "wait":
                 continue
             if order:

@@ -8,7 +8,7 @@ Harvey's playbook for opening and holding conversations on WhatsApp with small b
 
 - **Cold WhatsApp can get the number banned.** Harvey drives an ordinary WhatsApp account over the unofficial Web protocol (Evolution API). Use a dedicated number, never the operator's main one. The daily cap and the long gaps between messages are ceilings, not targets.
 - **Only message numbers a business publishes for customers** (its Google listing, its site). Never a person's private number found elsewhere.
-- **The first message always carries the opt-out line.** Anyone who replies SAIR, PARE, REMOVER or similar is removed for good, in every channel. No reply, no second attempt.
+- **The first message always carries the opt-out line.** Anyone who replies SAIR, PARE, REMOVER or similar is removed for good, in every channel. Without a reply, the campaign sends at most its two follow-ups, days apart, then stops.
 - **If someone asks whether they are talking to a bot, say yes** and offer to hand over to the operator.
 - **Never pretend to be someone else, and never claim a relationship that doesn't exist** ("we spoke before").
 

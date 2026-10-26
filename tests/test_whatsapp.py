@@ -4,6 +4,7 @@ split, the WhatsApp sender (stage / drain) and reading replies."""
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -284,8 +285,16 @@ class StubBrain:
         self.action, self.confidence, self.decision = action, confidence, decision
         self.paused_reason = ""
 
+    sequence = [
+        {"step": 1, "body": "Oi, aqui é o Luis. A {{company}} atende pelo WhatsApp?", "delay_days": 0},
+        {"step": 2, "body": "Oi de novo. Fiz um exemplo para a {{company}}, quer ver?", "delay_days": 3},
+        {"step": 3, "body": "Última mensagem, prometo. Fico à disposição.", "delay_days": 4},
+    ]
+
     async def think_json(self, prompt, session_id=None, agent="", task="", model=""):
         self.prompts.append((task, prompt))
+        if task == "write_sequence":
+            return [dict(s) for s in self.sequence]
         if self.decision is not None:
             return self.decision
         return {"action": self.action, "reply": self.text, "intent": self.intent,
@@ -467,6 +476,75 @@ async def test_daily_cap_counts_only_whatsapp(state):
     await state.update_outbox_item(item[0]["id"], status="sent",
                                    sent_at="2099-01-01T00:00:00")
     assert await state.count_outbox_sent_today(channel="whatsapp") == 0
+
+
+# ── campaigns ──
+
+
+@pytest.mark.asyncio
+async def test_an_opening_joins_a_campaign_with_its_follow_ups_staged(state):
+    await _company(state)
+    client = FakeEvolution({"5511987654321": "5511987654321"})
+    sender = _sender(state, client)
+    await sender._stage()
+    await sender._campaigns()
+    await sender._campaigns()                              # idempotent
+
+    [campaign] = await state.get_campaigns_by_status("active")
+    assert campaign.channel == "whatsapp" and campaign.name == "Oficina mecânica-whatsapp"
+    assert [s.step for s in campaign.sequence] == [1, 2, 3]
+    items = sorted(await state.get_outbox(channel="whatsapp"), key=lambda i: i["step"])
+    assert [i["step"] for i in items] == [1, 2, 3]
+    assert {i["campaign_id"] for i in items} == {campaign.id}
+    assert campaign.prospect_ids == [items[0]["prospect_id"]]
+    assert "Oficina do Zé" in items[1]["body"] and items[1]["body"].endswith(OPT_OUT)
+    assert all(i["status"] == "pending_review" for i in items)
+    assert await state.get_campaigns_by_status("draft") == []   # the email Sender never sees it
+
+
+@pytest.mark.asyncio
+async def test_openings_sent_before_campaigns_are_adopted(state):
+    await _company(state, "Um")
+    await _company(state, "Dois", phone="(11) 97777-0000")
+    client = FakeEvolution({"5511987654321": "5511987654321", "5511977770000": "5511977770000"})
+    sender = _sender(state, client, require_approval=False)
+    await sender._stage()
+    await sender._drain()                                   # the old way: sent, no campaign
+    first, second = await state.get_outbox(channel="whatsapp")
+    await state.update_prospect_status(second["prospect_id"], "replied")
+
+    await sender._campaigns()
+    [campaign] = await state.get_campaigns_by_status("active")
+    assert set(campaign.prospect_ids) == {first["prospect_id"], second["prospect_id"]}
+    rows = await state.get_outbox(channel="whatsapp")
+    follow_ups = [r for r in rows if r["step"] > 1]
+    assert {r["prospect_id"] for r in follow_ups} == {first["prospect_id"]}  # nothing for who replied
+    sent_at = datetime.fromisoformat((await state.get_outbox_item(first["id"]))["sent_at"])
+    step2 = next(r for r in follow_ups if r["step"] == 2)
+    assert datetime.fromisoformat(step2["send_at"]) == sent_at + timedelta(days=3)
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_waits_for_the_opening_and_its_gap(state):
+    await _company(state)
+    client = FakeEvolution({"5511987654321": "5511987654321"})
+    sender = _sender(state, client, require_approval=False)
+    await sender._stage()
+    await sender._campaigns()
+    rows = sorted(await state.get_outbox(channel="whatsapp"), key=lambda i: i["step"])
+    # Make every step due now: only the opening may go.
+    for r in rows[1:]:
+        await state.update_outbox_item(r["id"], send_at="2000-01-01T00:00:00")
+    await sender._drain()
+    assert len(client.sent) == 1
+    await sender._drain()
+    assert len(client.sent) == 1                            # step 2 waits 3 days after it
+
+    opener = await state.get_outbox_item(rows[0]["id"])
+    await state.update_outbox_item(opener["id"], sent_at="2000-01-01T00:00:00")
+    await state.update_outbox_item(rows[1]["id"], send_at="2000-01-01T00:00:00")
+    await sender._drain()
+    assert len(client.sent) == 2 and "Oficina do Zé" in client.sent[1][1]
 
 
 # ── reading replies ──

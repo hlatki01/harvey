@@ -1089,7 +1089,7 @@ class StateManager:
 
     _OUTBOX_COLUMNS = frozenset({
         "status", "error", "message_id", "thread_ref", "sent_at",
-        "subject", "body", "send_at", "provider",
+        "subject", "body", "send_at", "provider", "campaign_id",
     })
 
     async def update_outbox_item(self, item_id: str, **kwargs):
@@ -1274,6 +1274,19 @@ class StateManager:
                 (prospect_id, channel),
             ) as cursor:
                 return await cursor.fetchone() is not None
+
+    async def get_whatsapp_openers_without_campaign(self, limit: int = 200) -> list[dict]:
+        """WhatsApp first messages staged before they belonged to a campaign
+        (or whose campaign couldn't be written yet), still live or sent."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM outbox WHERE channel = 'whatsapp' AND kind = 'sequence' "
+                "AND step = 1 AND COALESCE(campaign_id, '') = '' "
+                "AND status IN ('pending_review', 'approved', 'sending', 'sent') "
+                "ORDER BY created_at ASC LIMIT ?", (int(limit),),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
 
     async def get_step_delay_days(self, campaign_id: str, step: int) -> int | None:
         """The campaign's planned wait before `step` (days after the step

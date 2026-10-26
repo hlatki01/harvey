@@ -427,7 +427,8 @@ Return ONLY a JSON array (no markdown fences, no commentary):
             step.subject, step.body = draft["subject"], draft["body"]
         return steps
 
-    def _parse_sequence(self, result) -> list[EmailStep]:
+    @staticmethod
+    def _parse_sequence(result) -> list[EmailStep]:
         """Robustly coerce LLM output into a validated EmailStep list.
 
         Never raises. Tolerates a wrapper dict ({"emails": [...]}), missing

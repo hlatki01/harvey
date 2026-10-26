@@ -12,13 +12,13 @@ import { EmptyState, OfflineState, Skeleton } from '@/components/ui/states'
 import { submitFeedback } from './pipeline/shared'
 
 interface Recipient {
-  id: string; email: string; first_name?: string; last_name?: string; company?: string; title?: string
+  id: string; email: string; phone?: string; first_name?: string; last_name?: string; company?: string; title?: string
   personalization_notes?: string; source?: string; status?: string; email_status?: string
   sent_by_hand?: boolean; can_send_by_hand?: boolean; can_mark_sent?: boolean
 }
 interface Step { step?: number | string; subject?: string; body?: string; delay_days?: number }
 interface Campaign {
-  id: string; name?: string; status?: string; created_at?: string; footer?: string; send_as?: string
+  id: string; name?: string; channel?: string; status?: string; created_at?: string; footer?: string; send_as?: string
   prospect_ids?: string[]; sequence?: Step[]; recipients?: Recipient[]
 }
 
@@ -113,7 +113,7 @@ export function CampaignsPage() {
     if (left) toast('This draft still has a {{placeholder}} in it. Fix it in Gmail before sending.', 'error')
   }
 
-  const head = <SectionHead title="Campaigns">Email sequences Harvey has written, and how far each one has got.</SectionHead>
+  const head = <SectionHead title="Campaigns">Email and WhatsApp sequences Harvey has written, and how far each one has got.</SectionHead>
   if (data === undefined) return <>{head}<Skeleton /></>
   if (!data) return <>{head}<OfflineState /></>
   if (!data.length) {
@@ -136,22 +136,25 @@ export function CampaignsPage() {
         {data.map(c => {
           const steps = c.sequence || []
           const pc = (c.prospect_ids || []).length
+          const wa = c.channel === 'whatsapp'
+          const noun = wa ? 'message' : 'email'
           return (
             <Card key={c.id} flush>
               <div className="p-4">
                 <div className="flex items-center gap-2">
                   <h3 className="font-semibold">{c.name || 'Untitled Campaign'}</h3>
+                  {wa && <ToneBadge tone="good">WhatsApp</ToneBadge>}
                   <Button variant="ghost" size="sm" onClick={() => submitFeedback(toast, 'campaign', c.id,
-                    'What should Harvey do differently in the emails it writes next? (e.g. "shorter; don\'t mention reviews")')}>Feedback</Button>
+                    `What should Harvey do differently in the ${noun}s it writes next? (e.g. "shorter; don't mention reviews")`)}>Feedback</Button>
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-3 text-[13px] text-text-2">
                   <StatusBadge status={c.status} />
-                  <span>{pc} prospect{pc !== 1 ? 's' : ''}</span><span>{steps.length} emails</span><span>Created {relTime(c.created_at)}</span>
+                  <span>{pc} prospect{pc !== 1 ? 's' : ''}</span><span>{steps.length} {noun}s</span><span>Created {relTime(c.created_at)}</span>
                 </div>
                 <Progress c={c} />
               </div>
               <div className="border-t border-line px-4 pb-4">
-                {!steps.length && <p className="pt-4 text-[13px] text-text-2">No email steps in this campaign.</p>}
+                {!steps.length && <p className="pt-4 text-[13px] text-text-2">No {noun} steps in this campaign.</p>}
                 {steps.map((step, s) => {
                   const actions = (c.recipients || []).map(r => {
                     // Only offered when Harvey can't send itself and this person can still be emailed (the server decides).
@@ -187,9 +190,9 @@ export function CampaignsPage() {
                       <span className="grid size-6 shrink-0 place-items-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent">{String(step.step || '?')}</span>
                       <div className="min-w-0 flex-1">
                         <div className="text-[12px] text-text-3">
-                          {s === 0 ? 'First email' : 'Follow-up'}{step.delay_days ? ` · ${step.delay_days} days after the last` : ''}
+                          {s === 0 ? (wa ? 'First message (each business gets its own, written for it)' : 'First email') : 'Follow-up'}{step.delay_days ? ` · ${step.delay_days} days after the last` : ''}
                         </div>
-                        <div className="font-medium">{step.subject}</div>
+                        {!wa && <div className="font-medium">{step.subject}</div>}
                         <div className="mt-1 whitespace-pre-wrap text-[13px] text-text-2">{step.body}</div>
                         {actions.length > 0 && <div className="mt-2 space-y-1.5">{actions}</div>}
                       </div>
