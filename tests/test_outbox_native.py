@@ -17,6 +17,7 @@ from harvey.integrations.mail_provider import (
     MailProvider,
     SendResult,
     looks_like_bounce,
+    looks_like_delay,
 )
 
 
@@ -172,6 +173,11 @@ def test_bounce_detection():
     assert looks_like_bounce("mailer-daemon@googlemail.com", "anything")
     assert looks_like_bounce("mx@x.com", "Delivery Status Notification (Failure)")
     assert not looks_like_bounce("jane@acme.com", "Re: your note")
+    # Delay notices: the server is still retrying, so neither a bounce nor a reply.
+    assert not looks_like_bounce("postmaster@outlook.com", "Delivery delayed:itt e a cnh nova")
+    assert not looks_like_bounce("mailer-daemon@googlemail.com", "Delivery Status Notification (Delay)")
+    assert looks_like_delay("x@outlook.com", "Delivery delayed:como os alunos chegam?")
+    assert not looks_like_delay("jane@acme.com", "Re: sorry for the delay")
 
 
 # ── staging ──

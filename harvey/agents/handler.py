@@ -28,7 +28,7 @@ from harvey.integrations.calendar import CalendarClient
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.evolution import EvolutionClient
 from harvey.integrations.mail_provider import (
-    NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
+    NATIVE_PROVIDERS, get_mail_provider, looks_like_delay, strip_quoted_reply,
 )
 from harvey.models.conversation import Conversation, Message
 from harvey.models.prospect import INBOUND_EMAIL_SOURCE, INBOUND_WHATSAPP_SOURCE, Prospect
@@ -707,7 +707,9 @@ class Handler:
                 continue
             consumed = True
             try:
-                if msg.is_bounce:
+                if looks_like_delay(msg.from_email, msg.subject):
+                    logger.info(f"Handler: delivery delayed, server still retrying ({msg.subject[:60]})")
+                elif msg.is_bounce:
                     await self._handle_bounce(msg)
                 elif msg.body.strip():
                     await self._adopt_inbound_email(msg)

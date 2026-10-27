@@ -107,10 +107,22 @@ def strip_quoted_reply(body: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", kept)
 
 
+# A delay notice means the server is still retrying: not a bounce, not a reply.
+DELAY_SUBJECTS = ("delivery delayed", "entrega atrasada")
+
+
+def looks_like_delay(from_email: str, subject: str) -> bool:
+    f = (from_email or "").lower()
+    s = (subject or "").lower()
+    notice = any(m in f for m in BOUNCE_SENDERS) or any(m in s for m in BOUNCE_SUBJECTS)
+    return any(m in s for m in DELAY_SUBJECTS) or (notice and ("delay" in s or "atrasad" in s))
+
+
 def looks_like_bounce(from_email: str, subject: str) -> bool:
     f = (from_email or "").lower()
     s = (subject or "").lower()
-    return any(m in f for m in BOUNCE_SENDERS) or any(m in s for m in BOUNCE_SUBJECTS)
+    bounce = any(m in f for m in BOUNCE_SENDERS) or any(m in s for m in BOUNCE_SUBJECTS)
+    return bounce and not looks_like_delay(from_email, subject)
 
 
 class MailProvider(ABC):
