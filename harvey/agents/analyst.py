@@ -48,6 +48,7 @@ class Analyst:
             "campaigns": await self._campaign_performance(),
             "intents": await self._intent_breakdown(),
             "stages": await self._stage_breakdown(),
+            "cities": await self.state.funnel_by_location(),
             "insights": [],
         }
 

@@ -127,9 +127,23 @@ class Scout:
         self.env = env
         self.skills = ""
         self._queries_this_cycle = 0
+        self._geo = ""
         # In-memory dedup guards, reset each cycle.
         self._seen_prospect_keys: set[str] = set()
         self._seen_domains: set[str] = set()
+
+    async def _next_geo(self) -> str:
+        """One city per cycle, walking icp.geography in turn so every market
+        gets searched, not just the first."""
+        geos = self.config.icp.geography
+        if not geos:
+            return ""
+        try:
+            turn = int(await self.state.get_setting("scout:geo_turn", "0") or 0)
+        except ValueError:
+            turn = 0
+        await self.state.set_setting("scout:geo_turn", str(turn + 1))
+        return geos[turn % len(geos)]
 
     async def run(self):
         """Main prospecting flow: find leads matching ICP."""
@@ -139,6 +153,7 @@ class Scout:
         self._queries_this_cycle = 0
         self._seen_prospect_keys = set()
         self._seen_domains = set()
+        self._geo = await self._next_geo()
 
         prospects_found = 0
 
@@ -748,7 +763,7 @@ class Scout:
         logger.info("Scout: Searching for LinkedIn profiles...")
         count = 0
 
-        geo = self.config.icp.geography[0] if self.config.icp.geography else ""
+        geo = self._geo
         industry = self.config.icp.industries[0] if self.config.icp.industries else ""
 
         for title in self.config.icp.titles:
@@ -1063,11 +1078,10 @@ class Scout:
         """Build search queries to find ICP-matching companies."""
         queries = []
         industries = self.config.icp.industries or [""]
-        geos = self.config.icp.geography or [""]
         size = self.config.icp.company_size or ""
 
         for industry in industries[:2]:
-            geo = geos[0] if geos else ""
+            geo = self._geo
 
             parts = []
             if industry:
@@ -1577,7 +1591,7 @@ Respond ONLY with the JSON array."""
         if not keywords:
             return 0
         search_term = keywords[0]
-        geo = self.config.icp.geography[0] if self.config.icp.geography else ""
+        geo = self._geo
 
         logger.info(f"Scout: Searching job boards for '{search_term}' roles...")
         loop = asyncio.get_event_loop()

@@ -2549,6 +2549,46 @@ class StateManager:
                 rows = await cursor.fetchall()
                 return {row[0]: row[1] for row in rows}
 
+    async def funnel_by_location(self) -> list[dict]:
+        """The pipeline per company location (the searched city, for most
+        providers), so markets can be compared. A reply means a real one:
+        automatic messages ("ooo") don't count."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                WITH p AS (
+                    SELECT pr.id, pr.status, COALESCE(c.location, '') AS loc
+                    FROM prospects pr LEFT JOIN companies c ON c.id = pr.company_id
+                )
+                SELECT loc, COUNT(*) AS prospects,
+                    SUM(EXISTS (SELECT 1 FROM outbox o
+                                WHERE o.prospect_id = p.id AND o.status = 'sent')) AS contacted,
+                    SUM(EXISTS (SELECT 1 FROM conversations v WHERE v.prospect_id = p.id
+                                AND v.intent NOT IN ('', 'ooo'))) AS replied,
+                    SUM(EXISTS (SELECT 1 FROM conversations v WHERE v.prospect_id = p.id
+                                AND (v.intent = 'interested' OR v.stage IN
+                                     ('qualifying', 'presenting', 'negotiating', 'closing', 'closed_won'))))
+                        AS positive,
+                    SUM(EXISTS (SELECT 1 FROM conversations v WHERE v.prospect_id = p.id
+                                AND v.stage = 'closed_won')) AS won,
+                    SUM(p.status = 'opted_out') AS opted_out
+                FROM p GROUP BY loc
+            """) as cur:
+                funnel = {r["loc"]: dict(r) for r in await cur.fetchall()}
+            async with db.execute(
+                "SELECT location AS loc, COUNT(*) AS n FROM companies GROUP BY location"
+            ) as cur:
+                companies = {r["loc"]: r["n"] for r in await cur.fetchall()}
+        out = []
+        for loc in companies.keys() | funnel.keys():
+            row = funnel.get(loc) or {"prospects": 0, "contacted": 0, "replied": 0,
+                                      "positive": 0, "won": 0, "opted_out": 0}
+            row = {k: row[k] for k in ("prospects", "contacted", "replied", "positive", "won", "opted_out")}
+            contacted = row["contacted"]
+            out.append({"location": loc, "companies": companies.get(loc, 0), **row,
+                        "reply_rate": round(row["replied"] / contacted, 3) if contacted else None})
+        return sorted(out, key=lambda r: (-r["contacted"], -r["companies"], r["location"]))
+
     async def get_stage_distribution(self) -> dict[str, int]:
         """Count conversations by sales stage."""
         async with self._connect() as db:

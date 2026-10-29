@@ -24,7 +24,7 @@ x-harvey: &harvey
     HARVEY_CONTAINER: "1"
     # The host's http://127.0.0.1:18080 is not this container's loopback.
     EVOLUTION_API_URL: http://evolution-api:8080
-  volumes: &volumes
+  volumes:
     # A named volume, not a bind mount: SQLite in WAL mode needs real shared
     # memory between the two containers, which Windows bind mounts don't give.
     - harvey-data:/app/data
@@ -51,6 +51,14 @@ services:
     <<: *harvey
     command: ["python", "-m", "harvey", "dashboard"]
     networks: [default, evolution]   # the chat view reads WhatsApp history from Evolution
+    # Writable here only: Settings → Cities saves icp.geography into it.
+    volumes:
+      - harvey-data:/app/data
+      - ./harvey.yaml:/app/harvey.yaml:ro
+      - ./harvey.local.yaml:/app/harvey.local.yaml
+      - ./prompts:/app/prompts:ro
+      - ./skills:/app/skills
+      - ${CLAUDE_DIR:-~/.claude}:/home/harvey/.claude
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5555), 3)"]
       interval: 1m

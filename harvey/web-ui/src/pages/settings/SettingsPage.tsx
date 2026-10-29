@@ -3,12 +3,14 @@ import { SectionHead } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { IntegrationsPane } from './IntegrationsPane'
 import { UsersPane } from './UsersPane'
+import { CitiesPane } from './CitiesPane'
 
 const KEY = 'harvey-settings-pane'
-type Pane = 'integrations' | 'users'
+type Pane = 'integrations' | 'cities' | 'users'
+const PANES: Pane[] = ['integrations', 'cities', 'users']
 
 function initialPane(): Pane {
-  try { return localStorage.getItem(KEY) === 'users' ? 'users' : 'integrations' } catch { return 'integrations' }
+  try { const p = localStorage.getItem(KEY) as Pane; return PANES.includes(p) ? p : 'integrations' } catch { return 'integrations' }
 }
 
 export function SettingsPage() {
@@ -23,7 +25,7 @@ export function SettingsPage() {
         Credentials are stored locally in <code className="font-mono text-[12px]">.env</code> and never sent anywhere except the services themselves.
       </SectionHead>
       <div role="group" aria-label="Settings" className="mb-5 inline-flex rounded-md bg-surface-2 p-0.5">
-        {(['integrations', 'users'] as const).map(p => (
+        {PANES.map(p => (
           <button
             key={p}
             type="button"
@@ -33,7 +35,7 @@ export function SettingsPage() {
           >{p}</button>
         ))}
       </div>
-      {pane === 'users' ? <UsersPane /> : <IntegrationsPane />}
+      {pane === 'users' ? <UsersPane /> : pane === 'cities' ? <CitiesPane /> : <IntegrationsPane />}
     </>
   )
 }

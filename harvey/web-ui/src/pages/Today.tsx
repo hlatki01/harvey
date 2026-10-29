@@ -10,6 +10,7 @@ import { useNav, type TabId } from '@/app/nav'
 import { cn } from '@/lib/utils'
 import { Facts, Kpis, type TodayStats, type Trend } from './today/Kpis'
 import { LiveStatus } from './today/LiveStatus'
+import { Cities } from './today/Cities'
 import { Funnel, Runs, Setup } from './today/Side'
 import { TimelineItem, type ActivityRow } from './today/timeline'
 
@@ -123,6 +124,7 @@ export function TodayPage() {
           <Lessons />
           <Subhead>Pipeline right now</Subhead>
           <Card><LiveStatus /></Card>
+          <Cities />
           <RecentActivity />
         </div>
         <aside>

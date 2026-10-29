@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -439,6 +440,102 @@ async def save_env_settings(request: Request):
     return {"success": True}
 
 
+# ── Geography: which cities discovery searches ──
+
+_COORD_RE = re.compile(r"-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?(,\d{1,4})?")
+
+
+def _replace_icp_key(lines: list[str], key: str, block: list[str]) -> list[str]:
+    """Swap `icp.<key>` (the line and its indented body) for `block`, leaving
+    every other line, comments included, as it was. Appended to the icp
+    section when the key isn't there yet."""
+    icp = next((i for i, l in enumerate(lines) if re.match(r"icp:\s*(#.*)?$", l)), None)
+    if icp is None:
+        raise ValueError("no icp: section in the config file")
+    end = next((i for i in range(icp + 1, len(lines))
+                if lines[i].strip() and not lines[i][0].isspace()), len(lines))
+    start = next((i for i in range(icp + 1, end)
+                  if re.match(rf"\s{{2}}{key}:", lines[i])), None)
+    if start is None:
+        while end > icp + 1 and not lines[end - 1].strip():
+            end -= 1
+        return lines[:end] + block + lines[end:]
+    stop = start + 1
+    # The body is everything indented deeper than the key (blank lines inside it too).
+    while stop < end and (not lines[stop].strip() or re.match(r"\s{3,}", lines[stop])):
+        stop += 1
+    while stop > start + 1 and not lines[stop - 1].strip():
+        stop -= 1
+    return lines[:start] + block + lines[stop:]
+
+
+@app.get("/api/settings/geography")
+async def get_geography():
+    from harvey.config import load_config
+    icp = load_config(str(_resolve_config_file())).icp
+    coords = icp.geo_coordinates or {}
+    return {"cities": [{"name": c, "coordinate": coords.get(c, "")} for c in icp.geography]}
+
+
+@app.post("/api/settings/geography")
+async def save_geography(request: Request):
+    """Rewrite icp.geography and icp.geo_coordinates. The result is loaded
+    as a full config before it replaces the file, so a bad save can't stop
+    Harvey from starting."""
+    from harvey.config import ConfigError, load_config
+    data = await _json_body(request)
+    raw = data.get("cities")
+    if not isinstance(raw, list) or len(raw) > 50:
+        return _refuse("Send a list of up to 50 cities.")
+    names, coords = [], {}
+    for item in raw:
+        if not isinstance(item, dict):
+            return _refuse("Each city needs a name.")
+        name = " ".join(str(item.get("name") or "").split())
+        coord = re.sub(r"\s+", "", str(item.get("coordinate") or ""))
+        if not name or len(name) > 100:
+            return _refuse("Each city needs a name (up to 100 characters).")
+        if name.lower() in (n.lower() for n in names):
+            return _refuse(f"{name} is listed twice.")
+        if coord and not _COORD_RE.fullmatch(coord):
+            return _refuse(f"{name}: coordinates are lat,lng or lat,lng,radius_km.")
+        names.append(name)
+        if coord:
+            coords[name] = coord
+    if not names:
+        return _refuse("Keep at least one city.")
+
+    path = _resolve_config_file()
+    q = json.dumps  # a JSON string is a valid double-quoted YAML scalar
+    lines = read_user_text(path).split("\n")
+    try:
+        lines = _replace_icp_key(lines, "geography", ["  geography:"] + [f"    - {q(n, ensure_ascii=False)}" for n in names])
+        lines = _replace_icp_key(lines, "geo_coordinates",
+                                 ["  geo_coordinates:"] + [f"    {q(n, ensure_ascii=False)}: {q(c)}" for n, c in coords.items()]
+                                 if coords else ["  geo_coordinates: {}"])
+    except ValueError as e:
+        return _refuse(str(e))
+    text = "\n".join(lines)
+    fd, tmp = tempfile.mkstemp(prefix="harvey.", suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        load_config(tmp)
+    except ConfigError as e:
+        return _refuse(f"Not saved: {e}")
+    finally:
+        os.unlink(tmp)
+    # Written in place, not swapped in: in Docker the file is a single-file bind
+    # mount (a rename can't replace it) on a read-only root (no temp file beside it).
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    except OSError as e:
+        logger.warning("Failed to write %s: %s", path, e)
+        return _refuse(f"Could not write {path.name}: is it mounted read-only?")
+    return {"success": True, "cities": len(names), "harvey_running": bool(_check_harvey_pid())}
+
+
 @app.post("/api/settings/test-instantly")
 async def test_instantly(request: Request):
     """Test an Instantly API key."""
@@ -671,6 +768,16 @@ def _pipeline_bucket(status: str | None, stage: str | None, intent: str | None,
             return "interested"
         return "replied"
     return "closed_out"   # lost, opted out, bounced, unwritable
+
+
+@app.get("/api/funnel/cities")
+async def funnel_by_city():
+    """The pipeline per city, to compare markets."""
+    try:
+        return await _state().funnel_by_location()
+    except Exception as e:
+        logger.warning("funnel by city failed: %s", e)
+        return []
 
 
 @app.get("/api/stats")

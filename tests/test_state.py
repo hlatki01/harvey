@@ -113,3 +113,32 @@ async def test_contacts_for_company(state):
 
     contacts = await state.get_contacts_for_company(cid)
     assert len(contacts) == 2
+
+
+@pytest.mark.asyncio
+async def test_funnel_by_location_compares_cities(state):
+    from harvey.models.conversation import Conversation
+    cwb = await state.add_company(Company(name="A", domain="a.com.br", location="Curitiba, PR"))
+    await state.add_company(Company(name="B", domain="b.com.br", location="Curitiba, PR"))
+    await state.add_company(Company(name="C", domain="c.com.br", location="Joinville, SC"))
+    for i, intent in enumerate(["interested", "ooo", ""]):
+        pid = await state.add_prospect(Prospect(first_name=f"P{i}", email=f"p{i}@a.com.br", company_id=cwb))
+        await state.add_outbox_item(prospect_id=pid, to_email=f"p{i}@a.com.br", subject="s",
+                                    body="b", send_at="2026-01-01T00:00:00", status="sent", step=i + 1)
+        if intent:
+            await state.add_conversation(Conversation(id=f"c{i}", prospect_id=pid, intent=intent))
+
+    rows = {r["location"]: r for r in await state.funnel_by_location()}
+    assert rows["Curitiba, PR"] == {
+        "location": "Curitiba, PR", "companies": 2, "prospects": 3, "contacted": 3,
+        "replied": 1, "positive": 1, "won": 0, "opted_out": 0, "reply_rate": 0.333}
+    assert rows["Joinville, SC"]["companies"] == 1 and rows["Joinville, SC"]["reply_rate"] is None
+
+
+@pytest.mark.asyncio
+async def test_scout_walks_every_city_in_turn(state):
+    from types import SimpleNamespace
+    from harvey.agents.scout import Scout
+    config = SimpleNamespace(icp=SimpleNamespace(geography=["Curitiba, PR", "Joinville, SC"]))
+    scout = Scout(brain=None, state=state, config=config, env=None)
+    assert [await scout._next_geo() for _ in range(3)] == ["Curitiba, PR", "Joinville, SC", "Curitiba, PR"]
