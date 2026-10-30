@@ -1545,6 +1545,73 @@ async def conversation_send(convo_id: str, request: Request):
     return {"success": True}
 
 
+@app.post("/api/conversations/{convo_id}/suggest")
+async def conversation_suggest(convo_id: str, request: Request):
+    """A few possible next messages for the team to pick from, or, given the
+    team's own draft, a better version of it. Nothing is sent: the result
+    only fills the reply box for a person to edit."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    draft = str(data.get("draft") or "").strip()[:1500] if isinstance(data, dict) else ""
+    row, err = await _whatsapp_chat_of(convo_id)
+    if err:
+        return err
+    from harvey.brain import Brain
+    from harvey.config import load_config
+    from harvey.decide import find_demo
+    from harvey.gate import chat_brand
+    config = load_config()
+    wa = config.channels.whatsapp
+    state = _state()
+    convo = await state.get_conversation(convo_id)
+    prospect = await state.get_prospect(convo.prospect_id) if convo.prospect_id else None
+    who = {"harvey": "Theo", "team": "Equipe"}
+    history = "\n".join(f"{who.get(m.sender, 'Cliente')}: {m.content}" for m in convo.thread[-12:])
+    industry = getattr(prospect, "industry", "") or ""
+    demo = find_demo(industry, wa.demos)
+    demos = (f"{demo.label}: {demo.url}" if demo else
+             "; ".join(f"{d.label}: {d.url}" for d in wa.demos) or "none")
+    brain = Brain(state, config.brain)
+    persona = config.persona
+    if draft:
+        ask = ("The team wrote this draft to send next:\n" + draft + "\n\nRewrite it to fit the conversation "
+               "better and move the sale forward, keeping what it means to say. "
+               'JSON: {"suggestions": ["the improved message"]}')
+    else:
+        ask = ("Suggest 3 different next messages the team could send now, each moving the sale one step "
+               "forward (e.g. ask what they thought, propose a short call, answer what they asked). "
+               'JSON: {"suggestions": ["...", "...", "..."]}')
+    raw = await brain.think_json(
+        f"""You help the team of {chat_brand(persona.company)} answer a small business on WhatsApp. Tone: {persona.tone}. Write in {wa.language}.
+
+## The lead
+Business: {getattr(prospect, "company", "") or "unknown"}
+Kind of business: {industry or "unknown"}
+Example sites (the only links you may use): {demos}
+
+## Conversation (latest last)
+{history}
+
+## KNOWLEDGE BASE (the only source for facts)
+{brain.load_skill("knowledge_base")}
+
+## How to chat
+{brain.load_skill("whatsapp_outreach")}
+
+{ask}
+Short, like a person on WhatsApp, no greeting if the chat is already going.
+Never invent prices or facts not in the knowledge base.""",
+        agent="dashboard", task="suggest_replies", **({"model": wa.model} if wa.model else {}))
+    items = raw.get("suggestions") if isinstance(raw, dict) else None
+    suggestions = [s.strip() for s in items or [] if isinstance(s, str) and 0 < len(s.strip()) <= 1500][:3]
+    if not suggestions:
+        return JSONResponse({"success": False, "message": "Could not get suggestions right now."},
+                            status_code=502)
+    return {"success": True, "suggestions": suggestions}
+
+
 async def _whatsapp_chat_of(convo_id: str):
     """(phone, prospect status) of a WhatsApp conversation, or an error response."""
     rows = await query_db(

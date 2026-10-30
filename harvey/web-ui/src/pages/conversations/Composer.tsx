@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Mic, Paperclip, X } from 'lucide-react'
+import { Mic, Paperclip, Sparkles, Wand2, X } from 'lucide-react'
 import { api, JSON_HEADERS } from '@/lib/api'
 import { failMsg } from '@/lib/format'
 import { useToast } from '@/components/toast'
@@ -35,6 +35,8 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
   const [file, setFile] = useState<File | null>(null)
   const [sending, setSending] = useState(false)
   const [recSecs, setRecSecs] = useState<number | null>(null)   // null = not recording
+  const [ideas, setIdeas] = useState<string[]>([])
+  const [thinking, setThinking] = useState(false)
   const box = useRef<HTMLTextAreaElement>(null)
   const pick = useRef<HTMLInputElement>(null)
   const rec = useRef<Rec | null>(null)
@@ -90,6 +92,21 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
     }
     sendingRef.current = false
     if (mounted.current) { setSending(false); box.current?.focus() }
+  }
+
+  // No draft: three ideas to pick from. With one: it comes back improved, in the box.
+  async function suggest(draft = '') {
+    setThinking(true)
+    let r: { success?: boolean; suggestions?: string[] } | null
+    try {
+      r = await api('/api/conversations/' + encodeURIComponent(id) + '/suggest', {
+        method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ draft }) })
+    } catch { r = null }
+    if (!mounted.current) return
+    setThinking(false)
+    if (r && r.success && r.suggestions) {
+      if (draft) { setText(r.suggestions[0]); box.current?.focus() } else setIdeas(r.suggestions)
+    } else toast(failMsg(r, 'Could not get suggestions.'), 'error')
   }
 
   function onPick(e: React.ChangeEvent<HTMLInputElement>) {
@@ -152,6 +169,15 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
 
   return (
     <div className="mt-3">
+      {ideas.length > 0 && (
+        <div className="mb-2 flex flex-col items-start gap-1.5">
+          {ideas.map(t => (
+            <button key={t} type="button" title="Put this in the reply box"
+              className="max-w-full rounded-2xl bg-accent-soft px-3 py-1.5 text-left text-[12.5px] shadow-[inset_0_0_0_1px_var(--accent-line)] hover:brightness-95"
+              onClick={() => { setText(t); setIdeas([]); box.current?.focus() }}>{t}</button>
+          ))}
+        </div>
+      )}
       {file && (
         <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-accent-soft py-1 pl-3 pr-1.5 text-[12px] shadow-[inset_0_0_0_1px_var(--accent-line)]">
           {file.name} · {fileSize(file.size)}
@@ -166,6 +192,12 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
         </Button>
         <Button variant="ghost" size="sm" className="px-2" title="Record a voice message" aria-label="Record a voice message" disabled={sending} onClick={startRecording}>
           <Mic className="size-[18px]" />
+        </Button>
+        <Button variant="ghost" size="sm" className="px-2" title="Suggest next messages" aria-label="Suggest next messages" disabled={sending || thinking} onClick={() => suggest()}>
+          {thinking ? <Spin className="mr-0" /> : <Sparkles className="size-[18px]" />}
+        </Button>
+        <Button variant="ghost" size="sm" className="px-2" title="Improve the message in the box" aria-label="Improve the message in the box" disabled={sending || thinking || !text.trim()} onClick={() => suggest(text)}>
+          <Wand2 className="size-[18px]" />
         </Button>
         <Textarea
           ref={box} rows={1} value={text} aria-label="Reply on WhatsApp"

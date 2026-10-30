@@ -97,3 +97,32 @@ def test_today_does_not_count_a_bot_greeting_as_a_live_conversation(client):
     assert today["stats"]["open_conversations"] == 1 and today["stats"]["auto_replies"] == 1
     [live] = [i for i in today["items"] if i["key"] == "replies"]
     assert live["title"] == "1 live conversation" and "1 more were only automatic" in live["detail"]
+
+
+def test_suggested_replies_come_back_and_bad_ones_are_dropped(client, monkeypatch):
+    db, c = client.db_path, client
+    asyncio.run(StateManager(str(db)).init_db())
+    _sql(db, "INSERT INTO prospects (id, first_name, phone, status, company) VALUES ('w1', '', '5511999', 'replied', 'Oficina X')")
+    thread = [{"sender": "prospect", "content": "Pode ser", "timestamp": "2026-10-30T14:03:00"}]
+    _sql(db, "INSERT INTO conversations (id, prospect_id, channel, thread_json, status) "
+             "VALUES ('cw', 'w1', 'whatsapp', ?, 'needs_human')", (json.dumps(thread),))
+    seen = {}
+
+    async def fake_think_json(self, prompt, **kw):
+        seen["prompt"] = prompt
+        return {"suggestions": ["E aí, conseguiu ver?", "", 42, "Bora marcar 10 min?"]}
+
+    monkeypatch.setattr("harvey.brain.Brain.think_json", fake_think_json)
+    r = c.post("/api/conversations/cw/suggest").json()
+    assert r == {"success": True, "suggestions": ["E aí, conseguiu ver?", "Bora marcar 10 min?"]}
+    assert "Cliente: Pode ser" in seen["prompt"]
+    assert c.post("/api/conversations/nope/suggest").status_code == 404
+    # With the team's draft: one improved version, written from it.
+    async def improve(self, prompt, **kw):
+        seen["prompt"] = prompt
+        return {"suggestions": ["Conseguiu dar uma olhada no modelo?"]}
+
+    monkeypatch.setattr("harvey.brain.Brain.think_json", improve)
+    r = c.post("/api/conversations/cw/suggest", json={"draft": "viu o site?"}).json()
+    assert r["suggestions"] == ["Conseguiu dar uma olhada no modelo?"]
+    assert "viu o site?" in seen["prompt"]
