@@ -355,3 +355,25 @@ async def test_inbound_dedup(state):
     await handler._run_native()   # same message again → ignored via dedup
     second = await state.get_conversations_by_status("closed")
     assert len(first) == len(second) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_delay_notice_tells_the_owner_once_a_day(state, monkeypatch):
+    # A broken mail server shows up only as delay notices: someone has to hear about them.
+    from harvey import notify
+    pushed = []
+
+    async def fake_push(state, config, event, key, text, client=None):
+        if key in {k for _, k, _ in pushed}:
+            return False
+        pushed.append((event, key, text))
+        return True
+
+    monkeypatch.setattr(notify, "push", fake_push)
+    provider = FakeProvider()
+    provider.inbound = [
+        InboundMessage(provider_id=f"d{i}", from_email="postmaster@outlook.com",
+                       subject="Delivery delayed:exemplo", body="no TLSA records found")
+        for i in range(2)]
+    await make_handler(state, provider)._run_native()
+    assert len(pushed) == 1 and pushed[0][0] == "system" and "holding outgoing email" in pushed[0][2]

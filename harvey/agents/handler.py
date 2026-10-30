@@ -12,7 +12,7 @@ import html
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
@@ -709,6 +709,12 @@ class Handler:
             try:
                 if looks_like_delay(msg.from_email, msg.subject):
                     logger.info(f"Handler: delivery delayed, server still retrying ({msg.subject[:60]})")
+                    # Delays are harmless one at a time, but a broken mail server only ever
+                    # shows up as delays: once a day, make sure a person hears about them.
+                    await notify.push(self.state, self.config, "system",
+                                      f"system:mail-delayed:{date.today().isoformat()}",
+                                      f"Harvey: the mail server is holding outgoing email "
+                                      f"(\"{msg.subject[:80]}\"). If this repeats, check its queue.")
                 elif msg.is_bounce:
                     await self._handle_bounce(msg)
                 elif msg.body.strip():
