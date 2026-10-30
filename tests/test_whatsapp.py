@@ -1346,3 +1346,21 @@ async def test_the_today_widget_reports_whatsapp_use_and_connection(state, monke
                                    sent_at=__import__("datetime").datetime.utcnow().isoformat())
     wa = await dash._whatsapp_today(state)
     assert wa == {"enabled": True, "connected": True, "sent_today": 1, "cap": 10, "chats": 2}
+
+
+@pytest.mark.asyncio
+async def test_a_reply_never_waits_behind_a_backlog_of_openings(state):
+    # Openings due earlier than the reply used to fill the page, holding it for hours.
+    pid = await _contacted_prospect(state)
+    early = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    for i in range(20):
+        await state.add_outbox_item(prospect_id=f"other{i}", to_email=f"55119000000{i:02d}", subject="WhatsApp",
+                                    body="Oi", send_at=early, status="approved", campaign_id="k",
+                                    channel="whatsapp")
+    reply = await state.add_outbox_item(prospect_id=pid, to_email="5511987654321", subject="WhatsApp",
+                                        body="Claro, segue o modelo.", send_at=datetime.utcnow().isoformat(),
+                                        status="approved", kind="reply", channel="whatsapp")
+    client = FakeEvolution()
+    await _sender(state, client).send_replies()
+    assert client.sent and client.sent[0][0] == "5511987654321"
+    assert (await state.get_outbox_item(reply))["status"] == "sent"

@@ -363,11 +363,16 @@ Return ONLY a JSON array:
             logger.info(f"WhatsApp: daily cap reached ({sent_today}/{self.cfg.max_daily_sends}).")
             return
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        # Answers to people already talking go first: a backlog of openings,
+        # all due earlier, would otherwise fill the page and hold them for hours.
         due = await self.state.get_outbox(
             status="approved", due_before=now, limit=budget * 3, channel="whatsapp",
-            skip_unready_follow_ups=True)
-        if replies_only:
-            due = [i for i in due if i["kind"] == "reply"]
+            exclude_kind="sequence")
+        if not replies_only:
+            seen = {i["id"] for i in due}
+            due += [i for i in await self.state.get_outbox(
+                status="approved", due_before=now, limit=budget * 3, channel="whatsapp",
+                skip_unready_follow_ups=True) if i["id"] not in seen]
         sent = 0
         for item in due:
             if sent >= budget:

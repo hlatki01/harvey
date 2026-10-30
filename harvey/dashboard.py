@@ -13,7 +13,7 @@ import time
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -1540,24 +1540,16 @@ async def conversation_send(convo_id: str, request: Request):
     convo = await state.get_conversation(convo_id)
     convo.thread.append(Message(sender="team", content=text))
     await state.update_conversation(convo_id, thread_json=convo.thread_json(), status="needs_human")
+    await _team_took_over(state, convo.prospect_id)
     await state.log_action("whatsapp_sent", "dashboard", {
         "to": row["phone"], "kind": "team", "message_id": result.message_id})
     return {"success": True}
 
 
-@app.post("/api/conversations/{convo_id}/suggest")
-async def conversation_suggest(convo_id: str, request: Request):
-    """A few possible next messages for the team to pick from, or, given the
-    team's own draft, a better version of it. Nothing is sent: the result
-    only fills the reply box for a person to edit."""
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
-    draft = str(data.get("draft") or "").strip()[:1500] if isinstance(data, dict) else ""
-    row, err = await _whatsapp_chat_of(convo_id)
-    if err:
-        return err
+async def _chat_ideas(convo_id: str, ask: str, task: str) -> list[str]:
+    """Up to three messages the model proposes for this WhatsApp chat, from
+    the conversation, the knowledge base and the example sites. `ask` says
+    what to propose and the JSON shape ({"suggestions": [...]})."""
     from harvey.brain import Brain
     from harvey.config import load_config
     from harvey.decide import find_demo
@@ -1575,14 +1567,6 @@ async def conversation_suggest(convo_id: str, request: Request):
              "; ".join(f"{d.label}: {d.url}" for d in wa.demos) or "none")
     brain = Brain(state, config.brain)
     persona = config.persona
-    if draft:
-        ask = ("The team wrote this draft to send next:\n" + draft + "\n\nRewrite it to fit the conversation "
-               "better and move the sale forward, keeping what it means to say. "
-               'JSON: {"suggestions": ["the improved message"]}')
-    else:
-        ask = ("Suggest 3 different next messages the team could send now, each moving the sale one step "
-               "forward (e.g. ask what they thought, propose a short call, answer what they asked). "
-               'JSON: {"suggestions": ["...", "...", "..."]}')
     raw = await brain.think_json(
         f"""You help the team of {chat_brand(persona.company)} answer a small business on WhatsApp. Tone: {persona.tone}. Write in {wa.language}.
 
@@ -1603,9 +1587,33 @@ Example sites (the only links you may use): {demos}
 {ask}
 Short, like a person on WhatsApp, no greeting if the chat is already going.
 Never invent prices or facts not in the knowledge base.""",
-        agent="dashboard", task="suggest_replies", **({"model": wa.model} if wa.model else {}))
+        agent="dashboard", task=task, **({"model": wa.model} if wa.model else {}))
     items = raw.get("suggestions") if isinstance(raw, dict) else None
-    suggestions = [s.strip() for s in items or [] if isinstance(s, str) and 0 < len(s.strip()) <= 1500][:3]
+    return [s.strip() for s in items or [] if isinstance(s, str) and 0 < len(s.strip()) <= 1500][:3]
+
+
+@app.post("/api/conversations/{convo_id}/suggest")
+async def conversation_suggest(convo_id: str, request: Request):
+    """A few possible next messages for the team to pick from, or, given the
+    team's own draft, a better version of it. Nothing is sent: the result
+    only fills the reply box for a person to edit."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    draft = str(data.get("draft") or "").strip()[:1500] if isinstance(data, dict) else ""
+    row, err = await _whatsapp_chat_of(convo_id)
+    if err:
+        return err
+    if draft:
+        ask = ("The team wrote this draft to send next:\n" + draft + "\n\nRewrite it to fit the conversation "
+               "better and move the sale forward, keeping what it means to say. "
+               'JSON: {"suggestions": ["the improved message"]}')
+    else:
+        ask = ("Suggest 3 different next messages the team could send now, each moving the sale one step "
+               "forward (e.g. ask what they thought, propose a short call, answer what they asked). "
+               'JSON: {"suggestions": ["...", "...", "..."]}')
+    suggestions = await _chat_ideas(convo_id, ask, "suggest_replies")
     if not suggestions:
         return JSONResponse({"success": False, "message": "Could not get suggestions right now."},
                             status_code=502)
@@ -1826,6 +1834,8 @@ async def conversation_attach(convo_id: str, request: Request):
                             status_code=502)
     state = _state()
     await state.update_conversation(convo_id, status="needs_human")
+    convo = await state.get_conversation(convo_id)
+    await _team_took_over(state, convo.prospect_id if convo else "")
     await state.log_action("whatsapp_sent", "dashboard", {
         "to": row["phone"], "kind": "team", "message_id": result.message_id, "file": filename})
     return {"success": True}
@@ -1853,7 +1863,74 @@ async def set_conversation_status(convo_id: str, request: Request):
     await state.update_conversation(convo_id, status=status)
     await state.log_action("conversation_status", "dashboard",
                            {"conversation_id": convo_id, "from": rows[0]["status"], "to": status})
-    return {"success": True, "status": status}
+    follow_up_at = None
+    if status == "closed":
+        convo = await state.get_conversation(convo_id)
+        if convo and convo.prospect_id:
+            await state.cancel_pending_outbox_for_prospect(convo.prospect_id, reason="conversation closed")
+    elif rows[0]["status"] == "needs_human":
+        follow_up_at = await _stage_hand_back_follow_up(state, convo_id)
+    return {"success": True, "status": status, "follow_up_at": follow_up_at}
+
+
+async def _team_took_over(state, prospect_id: str):
+    """The team just wrote in this chat: whatever Harvey still had queued for
+    the person was written before that and would talk over them."""
+    if prospect_id:
+        await state.cancel_pending_outbox_for_prospect(prospect_id, reason="team answered")
+
+
+HAND_BACK_FOLLOW_UP_DAYS = 1
+
+
+def _follow_up_time(config, now=None) -> str:
+    """About a day later, inside working hours (10:00-18:00 where the quiet
+    hours are set), as naive UTC like every send_at."""
+    import pytz
+    tz = pytz.timezone(config.usage.quiet_hours.timezone)
+    at = (now or datetime.now(timezone.utc)).astimezone(tz) + timedelta(days=HAND_BACK_FOLLOW_UP_DAYS)
+    if at.hour < 10:
+        at = at.replace(hour=10, minute=0)
+    elif at.hour >= 18:
+        at = (at + timedelta(days=1)).replace(hour=10, minute=0)
+    return at.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+async def _stage_hand_back_follow_up(state, convo_id: str) -> str | None:
+    """Handed back to Harvey with the last word ours (the team's, usually):
+    if they stay quiet, a nudge goes out later. Their answer cancels it
+    (stop-on-reply), and so does the team writing again or closing the chat.
+    Returns when it is due, or None when nothing was staged."""
+    from harvey.config import load_config
+    convo = await state.get_conversation(convo_id)
+    if (not convo or convo.channel != "whatsapp" or not convo.thread
+            or convo.thread[-1].sender not in ("team", "harvey") or not convo.prospect_id):
+        return None
+    prospect = await state.get_prospect(convo.prospect_id)
+    if not prospect or not prospect.phone or prospect.status == "opted_out":
+        return None
+    ideas = await _chat_ideas(
+        convo_id,
+        "They have not answered the last message yet. Write ONE short, friendly follow-up to send "
+        "tomorrow if they stay quiet: pick up on what was last said, don't repeat it word for word, "
+        "and make it easy to answer. "
+        'JSON: {"suggestions": ["the follow-up"]}',
+        "hand_back_follow_up")
+    if not ideas:
+        return None
+    config = load_config()
+    wa = config.channels.whatsapp
+    auto = not wa.require_approval or wa.auto_approve_replies or "answer" in wa.auto_approve_actions
+    send_at = _follow_up_time(config)
+    # Anything still queued was written before the last word: the follow-up replaces it.
+    await state.cancel_pending_outbox_for_prospect(prospect.id, reason="replaced by follow-up")
+    await state.add_outbox_item(
+        prospect_id=prospect.id, conversation_id=convo_id, kind="reply",
+        to_email=prospect.phone, subject="WhatsApp", body=ideas[0], send_at=send_at,
+        status="approved" if auto else "pending_review", provider="evolution", channel="whatsapp")
+    await state.log_action("follow_up_staged", "dashboard",
+                           {"conversation_id": convo_id, "send_at": send_at})
+    return send_at
 
 
 @app.get("/api/trend")

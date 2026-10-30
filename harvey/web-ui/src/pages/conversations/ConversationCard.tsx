@@ -95,7 +95,7 @@ function WhatsAppThread({ c, chat }: { c: Convo; chat: ReturnType<typeof useChat
 
 // Harvey answers new replies only on open conversations: an escalated one
 // waits for you to reply yourself, then close it or hand it back.
-function Actions({ c, onStatus }: { c: Convo; onStatus: (s: 'open' | 'closed') => void }) {
+function Actions({ c, onStatus, busy }: { c: Convo; onStatus: (s: 'open' | 'closed') => void; busy: '' | 'open' | 'closed' }) {
   const wrap = 'mt-4 flex flex-none flex-wrap items-center gap-2 border-t border-line pt-3'
   if (c.status === 'needs_human') {
     return (
@@ -104,29 +104,36 @@ function Actions({ c, onStatus }: { c: Convo; onStatus: (s: 'open' | 'closed') =
           <AlertTriangle className="size-3.5" aria-hidden />
           {c.channel === 'whatsapp' ? 'Harvey handed this to you. Reply above, then:' : 'Harvey handed this to you. Reply from your inbox, then:'}
         </span>
-        <Button size="sm" onClick={() => onStatus('open')}>Hand back to Harvey</Button>
-        <Button size="sm" onClick={() => onStatus('closed')}>Close</Button>
+        <Button size="sm" disabled={!!busy} onClick={() => onStatus('open')}>{busy === 'open' ? <><Spin />Handing back</> : 'Hand back to Harvey'}</Button>
+        <Button size="sm" disabled={!!busy} onClick={() => onStatus('closed')}>Close</Button>
       </div>
     )
   }
-  if (c.status === 'open') return <div className={wrap}><Button size="sm" variant="ghost" className="ml-auto" onClick={() => onStatus('closed')}>Close conversation</Button></div>
-  if (c.status === 'closed') return <div className={wrap}><Button size="sm" variant="ghost" className="ml-auto" onClick={() => onStatus('open')}>Reopen</Button></div>
+  if (c.status === 'open') return <div className={wrap}><Button size="sm" variant="ghost" className="ml-auto" disabled={!!busy} onClick={() => onStatus('closed')}>Close conversation</Button></div>
+  if (c.status === 'closed') return <div className={wrap}><Button size="sm" variant="ghost" className="ml-auto" disabled={!!busy} onClick={() => onStatus('open')}>Reopen</Button></div>
   return null
 }
 
 export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => void }) {
   const toast = useToast()
   const [lead, setLead] = useState(false)
+  const [busy, setBusy] = useState<'' | 'open' | 'closed'>('')
   const wa = c.channel === 'whatsapp'
   const chat = useChat(c.id, wa)
   const name = convoName(c)
   const stage = own(STAGE_LABELS, c.stage || '')
 
+  // Handing back can take a few seconds: Harvey writes the follow-up it will send if they stay quiet.
   async function setStatus(status: 'open' | 'closed') {
-    const data = await api<{ success?: boolean }>('/api/conversations/' + encodeURIComponent(c.id) + '/status', {
+    if (busy) return
+    setBusy(status)
+    const data = await api<{ success?: boolean; follow_up_at?: string | null }>('/api/conversations/' + encodeURIComponent(c.id) + '/status', {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ status }),
     })
-    if (data && data.success) toast(status === 'open' ? 'Open again. Harvey will answer the next reply.' : 'Closed. A new reply starts a new conversation.', 'success')
+    setBusy('')
+    const when = data?.follow_up_at ? new Date(data.follow_up_at + 'Z').toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : ''
+    if (data && data.success) toast(status === 'closed' ? 'Closed. A new reply starts a new conversation.'
+      : when ? `Back with Harvey. If they stay quiet, a follow-up goes out ${when}.` : 'Open again. Harvey will answer the next reply.', 'success')
     else toast(failMsg(data, 'Could not update that conversation.'), 'error')
     onChanged()
   }
@@ -151,7 +158,7 @@ export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => 
       </div>
       {wa ? <WhatsAppThread c={c} chat={chat} /> : <EmailThread c={c} />}
       {wa && ['needs_human', 'open'].includes(c.status) && <Composer id={c.id} chat={chat} />}
-      <Actions c={c} onStatus={setStatus} />
+      <Actions c={c} onStatus={setStatus} busy={busy} />
       {lead && <LeadModal id={c.id} name={[c.first_name, c.last_name].filter(Boolean).join(' ') || 'Lead'} onClose={() => setLead(false)} />}
     </div>
   )
