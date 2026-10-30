@@ -36,7 +36,8 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
   const [sending, setSending] = useState(false)
   const [recSecs, setRecSecs] = useState<number | null>(null)   // null = not recording
   const [ideas, setIdeas] = useState<string[]>([])
-  const [thinking, setThinking] = useState(false)
+  const [thinking, setThinking] = useState<'' | 'suggest' | 'improve'>('')   // the box is locked meanwhile
+  const busy = sending || !!thinking
   const box = useRef<HTMLTextAreaElement>(null)
   const pick = useRef<HTMLInputElement>(null)
   const rec = useRef<Rec | null>(null)
@@ -96,16 +97,17 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
 
   // No draft: three ideas to pick from. With one: it comes back improved, in the box.
   async function suggest(draft = '') {
-    setThinking(true)
+    setThinking(draft ? 'improve' : 'suggest')
     let r: { success?: boolean; suggestions?: string[] } | null
     try {
       r = await api('/api/conversations/' + encodeURIComponent(id) + '/suggest', {
         method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ draft }) })
     } catch { r = null }
     if (!mounted.current) return
-    setThinking(false)
+    setThinking('')
     if (r && r.success && r.suggestions) {
-      if (draft) { setText(r.suggestions[0]); box.current?.focus() } else setIdeas(r.suggestions)
+      if (draft) setText(r.suggestions[0]); else setIdeas(r.suggestions)
+      requestAnimationFrame(() => box.current?.focus())   // once the box is unlocked again
     } else toast(failMsg(r, 'Could not get suggestions.'), 'error')
   }
 
@@ -172,8 +174,8 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
       {ideas.length > 0 && (
         <div className="mb-2 flex flex-col items-start gap-1.5">
           {ideas.map(t => (
-            <button key={t} type="button" title="Put this in the reply box"
-              className="max-w-full rounded-2xl bg-accent-soft px-3 py-1.5 text-left text-[12.5px] shadow-[inset_0_0_0_1px_var(--accent-line)] hover:brightness-95"
+            <button key={t} type="button" title="Put this in the reply box" disabled={busy}
+              className="max-w-full rounded-2xl bg-accent-soft px-3 py-1.5 text-left text-[12.5px] shadow-[inset_0_0_0_1px_var(--accent-line)] hover:brightness-95 disabled:opacity-50"
               onClick={() => { setText(t); setIdeas([]); box.current?.focus() }}>{t}</button>
           ))}
         </div>
@@ -187,25 +189,26 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
       <div className="flex items-end gap-2">
         <input ref={pick} type="file" hidden onChange={onPick}
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" />
-        <Button variant="ghost" size="sm" className="px-2" title="Attach a file" aria-label="Attach a file" disabled={sending} onClick={() => pick.current?.click()}>
+        <Button variant="ghost" size="sm" className="px-2" title="Attach a file" aria-label="Attach a file" disabled={busy} onClick={() => pick.current?.click()}>
           <Paperclip className="size-[18px]" />
         </Button>
-        <Button variant="ghost" size="sm" className="px-2" title="Record a voice message" aria-label="Record a voice message" disabled={sending} onClick={startRecording}>
+        <Button variant="ghost" size="sm" className="px-2" title="Record a voice message" aria-label="Record a voice message" disabled={busy} onClick={startRecording}>
           <Mic className="size-[18px]" />
         </Button>
-        <Button variant="ghost" size="sm" className="px-2" title="Suggest next messages" aria-label="Suggest next messages" disabled={sending || thinking} onClick={() => suggest()}>
-          {thinking ? <Spin className="mr-0" /> : <Sparkles className="size-[18px]" />}
+        <Button variant="ghost" size="sm" className="px-2" title="Suggest next messages" aria-label="Suggest next messages" disabled={busy} onClick={() => suggest()}>
+          {thinking === 'suggest' ? <Spin className="mr-0" /> : <Sparkles className="size-[18px]" />}
         </Button>
-        <Button variant="ghost" size="sm" className="px-2" title="Improve the message in the box" aria-label="Improve the message in the box" disabled={sending || thinking || !text.trim()} onClick={() => suggest(text)}>
-          <Wand2 className="size-[18px]" />
+        <Button variant="ghost" size="sm" className="px-2" title="Improve the message in the box" aria-label="Improve the message in the box" disabled={busy || !text.trim()} onClick={() => suggest(text)}>
+          {thinking === 'improve' ? <Spin className="mr-0" /> : <Wand2 className="size-[18px]" />}
         </Button>
         <Textarea
           ref={box} rows={1} value={text} aria-label="Reply on WhatsApp"
-          placeholder="Reply on WhatsApp as the team…" className="min-h-8 flex-1 resize-none py-1.5"
+          disabled={!!thinking} aria-busy={!!thinking}
+          placeholder={thinking ? 'Thinking…' : 'Reply on WhatsApp as the team…'} className="min-h-8 flex-1 resize-none py-1.5"
           onChange={e => setText(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(text, file) } }}
         />
-        <Button variant="primary" size="sm" className="min-w-[76px]" disabled={sending} onClick={() => send(text, file)}>
+        <Button variant="primary" size="sm" className="min-w-[76px]" disabled={busy} onClick={() => send(text, file)}>
           {sending ? <><Spin className="mr-0" />Sending</> : 'Send'}
         </Button>
       </div>
