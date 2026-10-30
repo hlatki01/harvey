@@ -1068,6 +1068,40 @@ async def get_outbox_api():
         return {"error": str(e)}
 
 
+_OUTBOX_GROUPS = {
+    # group: (statuses, order)
+    "approved": (("sending", "approved"), "o.status = 'sending' DESC, o.send_at ASC, o.created_at ASC"),
+    "sent": (("sent",), "o.sent_at DESC"),
+    "failed": (("failed", "rejected", "cancelled"), "o.updated_at DESC"),
+}
+OUTBOX_PAGE = 25
+
+
+@app.get("/api/outbox/list")
+async def outbox_list(group: str = "approved", q: str = "", page: int = 1):
+    """One page of an Outbox table, searchable by number or address, company,
+    message text or the reason it didn't send. Rows carry the whole message."""
+    if group not in _OUTBOX_GROUPS:
+        return JSONResponse({"success": False, "message": "Unknown group."}, status_code=400)
+    statuses, order = _OUTBOX_GROUPS[group]
+    where = f"o.status IN ({_in(statuses)})"
+    params: tuple = tuple(statuses)
+    q = q.strip()[:100]
+    if q:
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where += " AND (" + " OR ".join(
+            f"{c} LIKE ? ESCAPE '\\'" for c in ("o.to_email", "o.body", "o.subject", "o.error", "p.company")) + ")"
+        params += (like,) * 5
+    base = f"FROM outbox o LEFT JOIN prospects p ON p.id = o.prospect_id WHERE {where}"
+    counted = await query_db(f"SELECT COUNT(*) AS n {base}", params)
+    total = counted[0]["n"] if counted else 0   # no database yet
+    page = max(1, page)
+    rows = await query_db(
+        f"SELECT o.*, p.company AS company {base} ORDER BY {order} LIMIT ? OFFSET ?",
+        params + (OUTBOX_PAGE, (page - 1) * OUTBOX_PAGE))
+    return {"rows": rows, "total": total, "page": page, "per_page": OUTBOX_PAGE}
+
+
 @app.post("/api/outbox/approve-all")
 async def outbox_approve_all():
     try:

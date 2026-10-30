@@ -25,6 +25,7 @@ export interface OutboxItem {
   sent_at?: string
   updated_at?: string
   error?: string
+  company?: string
   context?: DeskContext | null
 }
 

@@ -192,3 +192,21 @@ def test_follow_up_lands_in_working_hours_a_day_later():
     assert dash._follow_up_time(config, datetime(2026, 10, 30, 17, 0, tzinfo=timezone.utc)) == "2026-10-31T17:00:00"
     # 21:00 in São Paulo -> 10:00 two days later, never at night.
     assert dash._follow_up_time(config, datetime(2026, 10, 31, 0, 0, tzinfo=timezone.utc)) == "2026-11-01T13:00:00"
+
+
+def test_outbox_list_pages_and_searches_with_the_company(client):
+    db = client.db_path
+    asyncio.run(StateManager(str(db)).init_db())
+    _sql(db, "INSERT INTO prospects (id, first_name, phone, status, company) VALUES ('pa', '', '5511', 'replied', 'Oficina Alfa')")
+    for i in range(30):
+        _sql(db, "INSERT INTO outbox (id, prospect_id, kind, step, to_email, subject, body, status, send_at, error, "
+                 "channel) VALUES (?, ?, 'sequence', 1, ?, 'WhatsApp', ?, 'cancelled', '2026-10-30', ?, 'whatsapp')",
+             (f"o{i}", "pa" if i == 7 else "", f"55{i:04d}", f"texto {i}", "stop_on_reply"))
+    first = client.get("/api/outbox/list?group=failed").json()
+    assert first["total"] == 30 and len(first["rows"]) == 25
+    assert len(client.get("/api/outbox/list?group=failed&page=2").json()["rows"]) == 5
+    [hit] = client.get("/api/outbox/list?group=failed&q=alfa").json()["rows"]
+    assert hit["id"] == "o7" and hit["company"] == "Oficina Alfa" and hit["body"] == "texto 7"
+    assert client.get("/api/outbox/list?group=failed&q=100%25").json()["total"] == 0   # % is literal
+    assert client.get("/api/outbox/list?group=sent").json()["total"] == 0
+    assert client.get("/api/outbox/list?group=nope").status_code == 400

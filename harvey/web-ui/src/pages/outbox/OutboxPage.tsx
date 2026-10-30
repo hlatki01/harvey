@@ -155,7 +155,7 @@ export function OutboxPage() {
         ) : null}
       </div>
       {body}
-      {ok && <OutboxTables approved={ok.approved} sent={ok.sent} failed={ok.failed} />}
+      {ok && <OutboxTables />}
     </div>
   )
 }
