@@ -11,7 +11,7 @@ import { useToast } from '@/components/toast'
 interface HarveyStatus { running?: boolean; pid?: number | string; started_at?: string }
 interface Logs { lines?: string[] }
 
-const NO_LOGS = 'No logs yet. Start Harvey to see activity.'
+const NO_LOGS = 'No logs yet. Start Roadie Crew to see activity.'
 
 function AgentCard() {
   const toast = useToast()
@@ -24,7 +24,7 @@ function AgentCard() {
   async function act(kind: 'start' | 'stop') {
     setBusy(true)
     const r = await post<{ success?: boolean; message?: string }>(`/api/harvey/${kind}`)
-    if (r && r.success) toast(kind === 'start' ? 'Harvey started.' : 'Harvey stopped.', 'success')
+    if (r && r.success) toast(kind === 'start' ? 'Roadie Crew started.' : 'Roadie Crew stopped.', 'success')
     else toast(failMsg(r, kind === 'start' ? 'Failed to start.' : 'Failed to stop.'), 'error')
     setBusy(false)
     invalidate('/api/harvey/status')
@@ -40,11 +40,11 @@ function AgentCard() {
       <p className="mb-4 mt-1.5 text-[13px] text-text-2">
         {running && data?.pid
           ? <>PID {String(data.pid)}{data.started_at && <> &middot; started {formatDate(data.started_at)}</>}</>
-          : 'Harvey wakes every few minutes, does what needs doing, and sleeps.'}
+          : 'Roadie Crew wakes every few minutes, does what needs doing, and sleeps.'}
       </p>
       {running
-        ? <Button variant="danger" busy={busy} onClick={() => act('stop')}>Stop Harvey</Button>
-        : <Button variant="primary" busy={busy} onClick={() => act('start')}>Start Harvey</Button>}
+        ? <Button variant="danger" busy={busy} onClick={() => act('stop')}>Stop Roadie Crew</Button>
+        : <Button variant="primary" busy={busy} onClick={() => act('start')}>Start Roadie Crew</Button>}
     </Card>
   )
 }
@@ -72,7 +72,7 @@ function LogsCard() {
       <pre
         ref={ref}
         tabIndex={0}
-        aria-label="Harvey logs"
+        aria-label="Roadie Crew logs"
         onScroll={e => { const el = e.currentTarget; stick.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 30 }}
         className="m-0 h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-2 p-3 font-mono text-[12px] leading-relaxed text-text-2"
       >{text}</pre>
@@ -83,7 +83,7 @@ function LogsCard() {
 export function ControlsPage() {
   return (
     <>
-      <SectionHead title="Controls">Start and stop Harvey's heartbeat loop, and watch what it's doing.</SectionHead>
+      <SectionHead title="Controls">Start and stop Roadie Crew's heartbeat loop, and watch what it's doing.</SectionHead>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
         <AgentCard />
         <LogsCard />

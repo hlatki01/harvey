@@ -113,7 +113,7 @@ async def test_approvals_push_at_most_once_per_window(state):
     await notify.push_alerts(state, config, client)
     await notify.push_alerts(state, config, client)
     [text] = [t for _, t in client.sent]
-    assert text.startswith("Harvey: 1 message waiting for approval.") and "a@x.com" in text
+    assert text.startswith("Roadie Crew: 1 message waiting for approval.") and "a@x.com" in text
 
 
 @pytest.mark.asyncio
@@ -133,7 +133,7 @@ async def test_the_owner_approves_and_rejects_from_whatsapp(state):
 
     assert (await state.get_outbox_item(a))["status"] == "approved"
     assert (await state.get_outbox_item(b))["status"] == "rejected"
-    assert [t for _, t in client.sent] == [f"Harvey: {a[:6]} approved.", f"Harvey: {b[:6]} rejected."]
+    assert [t for _, t in client.sent] == [f"Roadie Crew: {a[:6]} approved.", f"Roadie Crew: {b[:6]} rejected."]
 
 
 @pytest.mark.asyncio

@@ -239,7 +239,7 @@ function IntegrationsForm({ data, reload }: { data: SettingsData; reload: () => 
 
       <Subhead>Optional</Subhead>
       <Card>
-        <Row title="LinkedIn" desc="For automated LinkedIn prospecting. Harvey logs in and searches like a human.">
+        <Row title="LinkedIn" desc="For automated LinkedIn prospecting. Roadie Crew logs in and searches like a human.">
           <TextField label="Email or username" value={f.liEmail} onChange={set('liEmail')} placeholder="your@email.com" />
           <SecretInput label="Password" value={f.liPass} onChange={set('liPass')} isSet={!!data.linkedin_password_set} placeholder="Enter password" autoComplete="new-password" />
           <Button variant="primary" size="sm" onClick={saveLinkedIn}>Save LinkedIn</Button>

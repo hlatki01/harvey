@@ -111,7 +111,7 @@ export function AddCompany({ onClose, onAdded }: { onClose: () => void; onAdded:
               ? <Button size="sm" variant="primary" onClick={() => goTab('outbox')}>Review it in the Outbox</Button>
               : added.can_open
                 ? <Button size="sm" variant="primary" disabled={!!busy} onClick={open}>{busy === 'open' ? 'Writing…' : 'Write the WhatsApp opening'}</Button>
-                : <span className="text-[13px] text-text-2">Harvey can't open a WhatsApp chat with this business.</span>}
+                : <span className="text-[13px] text-text-2">Roadie Crew can't open a WhatsApp chat with this business.</span>}
             <Button size="sm" variant="ghost" onClick={() => { setAdded(null); setQ(''); setQueued(false) }}>Add another</Button>
           </div>
         </div>

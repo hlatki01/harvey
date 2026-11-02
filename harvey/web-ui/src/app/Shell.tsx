@@ -11,6 +11,7 @@ import { cycleTheme, useThemeMode } from '@/lib/theme'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/states'
+import { Logo } from '@/components/Logo'
 import { ADMIN_TABS, useNav, type TabId } from './nav'
 import { Notifications } from './Notifications'
 import { PAGES } from './pages'
@@ -62,14 +63,17 @@ export function Shell() {
 
   const Page = PAGES[tab]
   const dot = locked ? 'bg-bad' : status === null ? 'bg-bad' : status?.running ? 'bg-good' : 'bg-text-3'
-  const statusText = locked ? 'Locked' : status === null ? 'Offline' : status === undefined ? 'Checking…' : status.running ? 'Harvey is running' : 'Harvey is stopped'
+  const statusText = locked ? 'Locked' : status === null ? 'Offline' : status === undefined ? 'Checking…' : status.running ? 'Roadie Crew is running' : 'Roadie Crew is stopped'
 
   return (
     <div className="flex min-h-dvh">
       <aside className="sticky top-0 flex h-dvh w-[236px] shrink-0 flex-col border-r border-line bg-surface px-3 py-4">
-        <div className="px-2 pb-4">
-          <h1 className="font-serif text-2xl font-semibold leading-none">Harvey</h1>
-          <div className="mt-1 text-[11px] uppercase tracking-widest text-text-3">Always Be Closing</div>
+        <div className="flex items-center gap-2.5 px-2 pb-5">
+          <Logo className="size-8 shrink-0" />
+          <div>
+            <h1 className="text-[17px] font-semibold leading-none tracking-tight">Roadie Crew</h1>
+            <div className="mt-1 text-[10px] uppercase tracking-widest text-text-3">Always Be Closing</div>
+          </div>
         </div>
 
         <nav aria-label="Sections" className="flex-1 space-y-5 overflow-y-auto">
@@ -81,8 +85,8 @@ export function Shell() {
                 const Icon = i.icon
                 return (
                   <button key={i.id} onClick={() => goTab(i.id)} aria-current={tab === i.id ? 'page' : undefined}
-                    className={cn('flex h-8 w-full items-center gap-2.5 rounded-sm px-2 text-left text-[13px]',
-                      tab === i.id ? 'bg-accent-soft font-medium text-accent' : 'text-text-2 hover:bg-surface-2 hover:text-text')}>
+                    className={cn('relative flex h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-[13px] transition-colors',
+                      tab === i.id ? 'bg-accent-soft font-medium text-accent before:absolute before:inset-y-1.5 before:left-0 before:w-[3px] before:rounded-r-full before:bg-accent' : 'text-text-2 hover:bg-surface-2 hover:text-text')}>
                     <Icon className="size-4 shrink-0" aria-hidden />
                     <span className="flex-1">{i.label}</span>
                     {n > 0 && <span className="rounded-full bg-accent px-1.5 text-[11px] font-medium leading-4 text-accent-text">{n}</span>}
@@ -116,7 +120,9 @@ export function Shell() {
       <main className="min-w-0 flex-1">
         <div className="mx-auto max-w-[1180px] px-8 py-8">
           <Suspense fallback={<Skeleton rows={4} />}>
-            <Page key={tab} />
+            <div key={tab} className="motion-safe:animate-[page-in_.22s_ease-out]">
+              <Page />
+            </div>
           </Suspense>
         </div>
       </main>

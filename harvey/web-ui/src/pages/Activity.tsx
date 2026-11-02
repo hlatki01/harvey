@@ -10,10 +10,10 @@ export function ActivityPage() {
   let day = ''
   return (
     <div>
-      <SectionHead title="Activity">A running log of every action Harvey's agents have taken.</SectionHead>
+      <SectionHead title="Activity">A running log of every action Roadie Crew's agents have taken.</SectionHead>
       {data === undefined ? <Skeleton /> : !data ? <OfflineState /> : !data.length ? (
         <EmptyState icon={<ActivityIcon className="size-5" />} title="No activity yet">
-          Harvey hasn't taken any actions. Every prospect found, email written, and reply handled will appear here the moment it happens.
+          Roadie Crew hasn't taken any actions. Every prospect found, email written, and reply handled will appear here the moment it happens.
         </EmptyState>
       ) : (
         <Card>

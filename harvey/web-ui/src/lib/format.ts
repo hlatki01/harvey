@@ -140,7 +140,7 @@ export function actionText(a: ActionRow): string {
     case 'outbox_edited': return 'You edited a draft'
     case 'conversation_status':
       return d.to === 'closed' ? 'You closed a conversation'
-        : d.from === 'needs_human' ? 'You handed a conversation back to Harvey' : 'You reopened a conversation'
+        : d.from === 'needs_human' ? 'You handed a conversation back to Roadie Crew' : 'You reopened a conversation'
   }
   const text = String(a.action_type || '').replace(/_/g, ' ')
   return a.agent === 'main' ? 'Heartbeat: ' + text : text

@@ -39,7 +39,7 @@ function Result({ report, running }: { report?: Report | null; running?: boolean
     return (
       <Card className="mt-6">
         <h3 className="font-semibold">Running…</h3>
-        <Muted className="mt-1">Harvey is working through the queries. Results land in Companies, and the run log is on Today.</Muted>
+        <Muted className="mt-1">Roadie Crew is working through the queries. Results land in Companies, and the run log is on Today.</Muted>
       </Card>
     )
   }
@@ -189,7 +189,7 @@ export function DiscoverPage() {
           <Card className="flex items-center justify-between gap-4">
             <div>
               <div className="font-medium">{unprofiled} {unprofiled === 1 ? 'company' : 'companies'} not looked at yet</div>
-              <Muted>Free, no account needed. Harvey reads each site for who their agency is, what they are missing, and whether they run ads. Up to 200 per run.</Muted>
+              <Muted>Free, no account needed. Roadie Crew reads each site for who their agency is, what they are missing, and whether they run ads. Up to 200 per run.</Muted>
             </div>
             <Button size="sm" variant="primary" disabled={isRunning} busy={profileStarting} onClick={doProfile}>
               {isRunning ? 'Busy…' : profileStarting ? 'Starting…' : 'Read their sites'}

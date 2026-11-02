@@ -129,7 +129,7 @@ export function OutboxPage() {
     body = <EmptyState icon={<AlertTriangle className="size-5" />} title="Couldn't read the Outbox">{data.error}</EmptyState>
   } else if (!cur) {
     body = <Card><EmptyState icon={<Check className="size-5" />} title="Nothing to review">
-      Every draft Harvey writes lands here first. Approve one and it sends on schedule.</EmptyState></Card>
+      Every draft Roadie Crew writes lands here first. Approve one and it sends on schedule.</EmptyState></Card>
   } else {
     body = (
       <div className="grid grid-cols-[280px_minmax(0,1fr)] items-start gap-4 max-lg:grid-cols-1">

@@ -37,7 +37,7 @@ PID_FILE = PROJECT_ROOT / "data" / "harvey.pid"
 # In Docker the loop is its own container; this process must not spawn another.
 IN_CONTAINER = bool(os.environ.get("HARVEY_CONTAINER"))
 ALIVE_STALE_SECONDS = 90  # four missed beacons
-CONTAINER_NOTE = "Harvey runs as its own container: use 'docker compose restart harvey'."
+CONTAINER_NOTE = "Roadie Crew runs as its own container: use 'docker compose restart harvey'."
 LOG_FILE = PROJECT_ROOT / "data" / "harvey.log"
 TOKEN_FILE = PROJECT_ROOT / "data" / "dashboard-token"
 
@@ -55,7 +55,7 @@ def _resolve_config_file() -> Path:
 
 # No /docs, /redoc or /openapi.json: the API is for this UI only, and every
 # route except the static shell needs the token (see dashboard_auth).
-app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Roadie Crew Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
 token_store = auth.TokenStore(TOKEN_FILE)
 _public_cache: tuple[float, str] = (0.0, "")
 
@@ -287,10 +287,10 @@ async def get_setup_status():
         except Exception:
             pass
     checks.append({
-        "id": "config", "label": f"Harvey configured ({config_path.name})",
+        "id": "config", "label": f"Roadie Crew configured ({config_path.name})",
         "done": config_valid,
         "required": True,
-        "help": "Train Harvey on your product. Use the trainer or set up manually through Claude.",
+        "help": "Train Roadie Crew on your product. Use the trainer or set up manually through Claude.",
     })
 
     # 6. Product trained
@@ -507,7 +507,7 @@ async def get_geography():
 async def remove_added_city(name: str):
     """Take out a city Harvey added: it is never searched or proposed again."""
     if not await _state().remove_discovery_city(name):
-        return _refuse("Harvey didn't add that city, or it was already taken out.", 404)
+        return _refuse("Roadie Crew didn't add that city, or it was already taken out.", 404)
     return {"success": True}
 
 
@@ -987,12 +987,12 @@ async def companies_open_whatsapp(company_id: str):
     a = await sender.assess(company, manual=True)
     if a.blocker:
         return _refuse(next((c["text"] for c in a.checks if not c["ok"] and not c["warning"]),
-                            "Harvey can't open a chat with this business."))
+                            "Roadie Crew can't open a chat with this business."))
     sender.brain = Brain(state, config.brain)
     sender.skills = sender.brain.load_skills_for_agent("whatsapp") + await state.lessons_block()
     item_id = await sender.stage(company, a.phone, review=True)
     if not item_id:
-        return _refuse("Harvey couldn't write a usable first message. Try again.", 502)
+        return _refuse("Roadie Crew couldn't write a usable first message. Try again.", 502)
     return {"success": True, "outbox_id": item_id}
 
 
@@ -1081,7 +1081,7 @@ async def start_harvey():
     if IN_CONTAINER:
         return {"success": False, "message": CONTAINER_NOTE}
     if _check_harvey_pid():
-        return {"success": False, "message": "Harvey is already running."}
+        return {"success": False, "message": "Roadie Crew is already running."}
 
     # Ensure data dir exists
     (PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
@@ -1101,7 +1101,7 @@ async def start_harvey():
             log_handle.close()
     except Exception as e:
         logger.warning("Failed to start Harvey: %s", e)
-        return {"success": False, "message": f"Failed to start Harvey: {e}"}
+        return {"success": False, "message": f"Failed to start Roadie Crew: {e}"}
     _harvey_started_at = datetime.now()
 
     # Write PID file
@@ -1123,7 +1123,7 @@ async def stop_harvey():
 
     pid = _check_harvey_pid()
     if not pid:
-        return {"success": False, "message": "Harvey is not running."}
+        return {"success": False, "message": "Roadie Crew is not running."}
 
     try:
         os.kill(pid, signal.SIGTERM)
@@ -1816,7 +1816,7 @@ async def mark_prospect_sent(prospect_id: str, request: Request):
             await state.set_setting(key, current)
             if prospect_id in await _harvey_committed_ids():
                 await state.delete_setting(key)
-                return _refuse("Harvey has already approved or sent an email to this person. "
+                return _refuse("Roadie Crew has already approved or sent an email to this person. "
                                "Check the Outbox.")
             await state.update_prospect_status(prospect_id, "contacted")
             # Anything Harvey had queued for them must not go out as well.
@@ -2414,7 +2414,7 @@ async def preview_conversation_follow_up(convo_id: str):
         logger.warning(f"Follow-up preview failed: {e}")
         text = ""
     if not text:
-        return _refuse("Harvey couldn't write a preview right now. Try again in a moment.", 502)
+        return _refuse("Roadie Crew couldn't write a preview right now. Try again in a moment.", 502)
     return {"success": True, "text": text}
 
 
@@ -2872,7 +2872,7 @@ async def get_live_status():
 
     next_tab = ""   # where the next step is done, when it's done in the dashboard
     if reading or finding:
-        next_up = "Wait — Harvey is working. This page updates by itself."
+        next_up = "Wait — Roadie Crew is working. This page updates by itself."
     elif finding_emails and not wa_only:
         next_up = "Wait — emails are being found."
     elif stopped:
@@ -2940,11 +2940,11 @@ async def _refresh_notifications(state) -> None:
 
     brain = await _brain_status()
     if brain.get("status") == "paused":
-        await raise_("system:brain", "Harvey's model is paused",
+        await raise_("system:brain", "Roadie Crew's model is paused",
                      str(brain.get("reason") or "It can't be used right now.")[:200], "bad", "controls")
     if not await _whatsapp_link_up():
         await raise_("system:whatsapp", "WhatsApp is offline",
-                     "Harvey can't read or send chats until the Evolution instance reconnects.", "bad", "settings")
+                     "Roadie Crew can't read or send chats until the Evolution instance reconnects.", "bad", "settings")
     await state.sync_notifications(raised)
 
 
@@ -3068,12 +3068,12 @@ async def get_today():
         # Ordered by how much it blocks Harvey from doing anything at all.
         brain = await _brain_status()
         if brain.get("status") == "paused":
-            who = "Codex" if brain.get("provider") == "codex" else "Harvey's model"
+            who = "Codex" if brain.get("provider") == "codex" else "Roadie Crew's model"
             items.append({
                 "key": "brain-paused", "tone": "bad",
-                "title": f"{who} is paused, so Harvey is waiting",
+                "title": f"{who} is paused, so Roadie Crew is waiting",
                 "detail": (str(brain.get("reason") or "It can't be used right now.")[:300] +
-                           " Replies and queued emails are untouched; Harvey resumes "
+                           " Replies and queued emails are untouched; Roadie Crew resumes "
                            "once it's fixed. harvey status --check says what's wrong."),
                 "action": "Open the log", "tab": "controls",
             })
@@ -3092,7 +3092,7 @@ async def get_today():
                        if c.get("required") and not c.get("done")]
             items.append({
                 "key": "setup", "tone": "warn",
-                "title": "Finish setting Harvey up",
+                "title": "Finish setting Roadie Crew up",
                 "detail": ", ".join(missing[:3]) or "Some required steps are incomplete.",
                 "action": "Open setup", "tab": "settings",
             })
@@ -3103,7 +3103,7 @@ async def get_today():
                 "title": (f"{len(proposed)} signal waiting for your confirmation"
                           if len(proposed) == 1
                           else f"{len(proposed)} signals waiting for your confirmation"),
-                "detail": ("Harvey won't collect anything you haven't approved. "
+                "detail": ("Roadie Crew won't collect anything you haven't approved. "
                            "Confirm which signals define a good prospect for you."),
                 "action": "Review signals", "tab": "signals",
             })
@@ -3140,7 +3140,7 @@ async def get_today():
                 "key": "needs-human", "tone": "bad",
                 "title": (f"{needs_human} conversation needs you" if needs_human == 1
                           else f"{needs_human} conversations need you"),
-                "detail": ("Harvey stopped and handed these over: an escalation, or a "
+                "detail": ("Roadie Crew stopped and handed these over: an escalation, or a "
                            "reply it had no safe answer for. Reply yourself, then close "
                            "it or hand it back."),
                 "action": "Read them", "tab": "conversations",
@@ -3163,7 +3163,7 @@ async def get_today():
                 "key": "replies", "tone": "good",
                 "title": (f"{open_convos} live conversation" if open_convos == 1
                           else f"{open_convos} live conversations"),
-                "detail": "People replied. Check how Harvey is handling them."
+                "detail": "People replied. Check how Roadie Crew is handling them."
                           + (f" ({auto_replies} more were only automatic replies.)" if auto_replies else ""),
                 "action": "Read conversations", "tab": "conversations",
             })
@@ -3183,7 +3183,7 @@ async def get_today():
 CATEGORY_META = {
     "discovery": {
         "label": "Discovery — who exists",
-        "blurb": "How Harvey finds businesses at all, and how visible they are. "
+        "blurb": "How Roadie Crew finds businesses at all, and how visible they are. "
                  "This is the only stage that costs money.",
     },
     "profile": {
@@ -3588,11 +3588,11 @@ async def _send_invite(user_id: str, email: str, name: str, role: str, invited_b
         result["message"] = "No mailbox is configured to send the invite. Copy the link instead."
         return result
     who = name or email
-    body = (f"Olá {who},\n\n{invited_by or 'A equipe'} convidou você para o painel do Harvey "
+    body = (f"Olá {who},\n\n{invited_by or 'A equipe'} convidou você para o painel do Roadie Crew "
             f"como {'administrador' if role == 'admin' else 'operador'}.\n\n"
             f"Crie sua senha neste link (vale por {acct.INVITE_DAYS} dias):\n{link}\n\n"
             "Se você não esperava este convite, ignore este e-mail.")
-    sent = await provider.send_email(email, "Convite para o painel do Harvey", body)
+    sent = await provider.send_email(email, "Convite para o painel do Roadie Crew", body)
     result["email_sent"] = sent.ok
     result["message"] = "Invite sent." if sent.ok else f"The email failed: {sent.error}"
     return result
@@ -3719,10 +3719,10 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 5555):
 
     if IN_CONTAINER:
         # Container logs persist and get shared: keep the unlock link out of them.
-        print("\n  Harvey Dashboard running. Print the unlock link with:\n\n"
+        print("\n  Roadie Crew Dashboard running. Print the unlock link with:\n\n"
               "    docker compose exec dashboard python -m harvey dashboard --url\n")
     else:
-        print(f"\n  Harvey Dashboard running. Open this link to unlock it:\n\n    {url}\n")
+        print(f"\n  Roadie Crew Dashboard running. Open this link to unlock it:\n\n    {url}\n")
         print(f"  The token is stored in {token_store.path} (owner-only). Keep the link")
         print("  private; anyone with it can use the dashboard. Press Ctrl+C to stop.\n")
     if os.name == "nt":

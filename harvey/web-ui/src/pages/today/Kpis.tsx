@@ -1,4 +1,5 @@
 import { NumberTicker } from '@/components/ui/number-ticker'
+import { MagicCard } from '@/components/ui/magic-card'
 import { cn } from '@/lib/utils'
 
 export interface TodayStats {
@@ -28,7 +29,11 @@ function SparkBars({ values, title }: { values?: number[]; title: string }) {
 
 function Kpi({ label, value, spark, note }: { label: string; value: number | null; spark?: React.ReactNode; note: React.ReactNode }) {
   return (
-    <div className="rounded-lg bg-surface p-4 shadow-card">
+    // Hover spotlight in the accent; the card's own surface and line fill in for
+    // the shadcn tokens (--color-background/--color-border) this app doesn't define.
+    <MagicCard className="rounded-lg p-4 shadow-card [--color-background:var(--surface)] [--color-border:var(--line)]"
+      gradientSize={180} gradientColor="var(--accent-soft)" gradientOpacity={0.6}
+      gradientFrom="var(--accent)" gradientTo="var(--accent-line)">
       <div className="text-[12px] text-text-3">{label}</div>
       <div className="my-1 flex items-end justify-between gap-2">
         {value === null
@@ -37,7 +42,7 @@ function Kpi({ label, value, spark, note }: { label: string; value: number | nul
         {spark}
       </div>
       <span className="text-[12px] text-text-2">{note}</span>
-    </div>
+    </MagicCard>
   )
 }
 

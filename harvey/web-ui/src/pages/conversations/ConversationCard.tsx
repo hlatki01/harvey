@@ -19,7 +19,7 @@ function DraftPanel({ c }: { c: Convo }) {
   if (!c.draft) return null
   return (
     <div className="w-[min(78%,64ch)] self-end rounded-[14px] border-[1.5px] border-dashed border-accent bg-accent-soft px-3.5 pb-3 pt-2.5 max-sm:w-auto max-sm:max-w-[92%]">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-accent"><PenLine className="size-3" aria-hidden />Harvey drafted a reply · waiting for you</div>
+      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-accent"><PenLine className="size-3" aria-hidden />Roadie Crew drafted a reply · waiting for you</div>
       <div className="mb-2.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed">{c.draft.body}</div>
       <Button variant="primary" size="sm" onClick={() => goTab('outbox')}>Review in Outbox<ArrowRight className="size-3.5" aria-hidden /></Button>
     </div>
@@ -57,7 +57,7 @@ function EmailThread({ c }: { c: Convo }) {
         const m = it.msg!, sent = m.sender === 'harvey' || m.sender === 'team'
         return (
           <div key={i} className={bubble(sent)}>
-            <div className="mb-0.5 text-[11px] opacity-70">{m.sender === 'team' ? 'Equipe' : sent ? 'Harvey' : first} &middot; {relTime(m.timestamp)}</div>
+            <div className="mb-0.5 text-[11px] opacity-70">{m.sender === 'team' ? 'Equipe' : sent ? 'Roadie Crew' : first} &middot; {relTime(m.timestamp)}</div>
             {m.content}
           </div>
         )
@@ -115,9 +115,9 @@ function Actions({ c, onStatus, onFollowUp, busy }: {
       <div className={wrap}>
         <span className="mr-auto inline-flex items-center gap-1.5 text-[12px] text-text-2">
           <AlertTriangle className="size-3.5" aria-hidden />
-          {c.channel === 'whatsapp' ? 'Harvey handed this to you. Reply above, then:' : 'Harvey handed this to you. Reply from your inbox, then:'}
+          {c.channel === 'whatsapp' ? 'Roadie Crew handed this to you. Reply above, then:' : 'Roadie Crew handed this to you. Reply from your inbox, then:'}
         </span>
-        <Button size="sm" disabled={!!busy} onClick={() => onStatus('open')}>{busy === 'open' ? <><Spin />Handing back</> : 'Hand back to Harvey'}</Button>
+        <Button size="sm" disabled={!!busy} onClick={() => onStatus('open')}>{busy === 'open' ? <><Spin />Handing back</> : 'Hand back to Roadie Crew'}</Button>
         <Button size="sm" disabled={!!busy} onClick={() => onStatus('closed')}>Close</Button>
       </div>
     )
@@ -136,7 +136,7 @@ function Actions({ c, onStatus, onFollowUp, busy }: {
             <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => onFollowUp('cancel')}>Cancel follow-up</Button>
             {preview && (
               <div className="basis-full rounded-md bg-surface-2 p-3 text-[13px]">
-                {preview === 'loading' ? <span className="inline-flex items-center gap-2 text-text-2"><Spin />Harvey is writing a preview…</span> : (
+                {preview === 'loading' ? <span className="inline-flex items-center gap-2 text-text-2"><Spin />Roadie Crew is writing a preview…</span> : (
                   <>
                     <div className="whitespace-pre-wrap break-words leading-relaxed">{preview}</div>
                     <div className="mt-1.5 text-[11px] text-text-3">A preview: the real message is written from the chat when it goes out, so it may differ.</div>
@@ -170,7 +170,7 @@ export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => 
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ action }),
     })
     setBusy('')
-    if (data && data.success) toast(action === 'cancel' ? 'Follow-up cancelled.' : 'Harvey writes and sends it on its next cycle in business hours.', 'success')
+    if (data && data.success) toast(action === 'cancel' ? 'Follow-up cancelled.' : 'Roadie Crew writes and sends it on its next cycle in business hours.', 'success')
     else toast(failMsg(data, 'Could not change the follow-up.'), 'error')
     onChanged()
   }
@@ -185,9 +185,9 @@ export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => 
     setBusy('')
     const when = data?.follow_up_at ? formatDate(data.follow_up_at) : ''
     if (data && data.success) toast(status === 'closed' ? 'Closed. A new reply starts a new conversation.'
-      : data.next === 'reply' ? 'Back with Harvey. It answered what was left open: the reply is in the Outbox or on its way.'
-      : data.next === 'handoff' ? `Harvey thinks this one is still yours${data.reason ? ` (${data.reason})` : ''}.`
-      : when ? `Back with Harvey. If they stay quiet, a follow-up goes out ${when}.` : 'Open again. Harvey will answer the next reply.', 'success')
+      : data.next === 'reply' ? 'Back with Roadie Crew. It answered what was left open: the reply is in the Outbox or on its way.'
+      : data.next === 'handoff' ? `Roadie Crew thinks this one is still yours${data.reason ? ` (${data.reason})` : ''}.`
+      : when ? `Back with Roadie Crew. If they stay quiet, a follow-up goes out ${when}.` : 'Open again. Roadie Crew will answer the next reply.', 'success')
     else toast(failMsg(data, 'Could not update that conversation.'), 'error')
     onChanged()
   }

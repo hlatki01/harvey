@@ -62,9 +62,9 @@ export function Quota({ d }: { d: UsageData }) {
       {!entries.length ? (
         <p className="text-[13px] text-text-2">
           {provider === 'codex'
-            ? "Quota unavailable: Harvey couldn't read your ChatGPT plan's limits (check codex login, the Codex CLI version, and network)."
-            : "Quota unavailable: Harvey couldn't read your Claude subscription's limits (check claude login and network)."}{' '}
-          Until it can, budgets count Harvey's own calls.
+            ? "Quota unavailable: Roadie Crew couldn't read your ChatGPT plan's limits (check codex login, the Codex CLI version, and network)."
+            : "Quota unavailable: Roadie Crew couldn't read your Claude subscription's limits (check claude login and network)."}{' '}
+          Until it can, budgets count Roadie Crew's own calls.
         </p>
       ) : entries.map(([key, w]) => {
         const pct = Math.min(100, Math.max(0, w.utilization || 0))
@@ -182,7 +182,7 @@ export function UsagePage() {
       )}
       {!anyRows ? (
         <EmptyState icon={<BarChart3 className="size-5" />} title="No usage recorded yet">
-          Once Harvey starts making model calls (Claude or Codex), every one is logged here with exact calls and tokens by provider, agent and task.
+          Once Roadie Crew starts making model calls (Claude or Codex), every one is logged here with exact calls and tokens by provider, agent and task.
         </EmptyState>
       ) : (
         <>

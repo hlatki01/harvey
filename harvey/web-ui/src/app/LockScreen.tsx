@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Field, Input } from '@/components/ui/field'
 import { BorderBeam } from '@/components/ui/border-beam'
+import { Logo } from '@/components/Logo'
 
 type Mode = 'token' | 'login' | 'invite'
 
@@ -86,7 +87,11 @@ export function LockScreen({ forceInvite }: { forceInvite: boolean }) {
   const shown = message || (publicHost ? '' : localReason)
 
   return (
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-bg p-6">
+    <div className="fixed inset-0 z-[1000] flex flex-col items-center justify-center gap-5 bg-bg p-6">
+      <div className="flex items-center gap-2.5">
+        <Logo className="size-10" />
+        <span className="text-xl font-semibold tracking-tight">Roadie Crew</span>
+      </div>
       <Card className="relative w-full max-w-[500px] overflow-hidden">
         <BorderBeam size={120} duration={8} colorFrom="var(--accent)" colorTo="var(--accent-line)" />
         <h2 className="text-lg font-semibold">{title}</h2>

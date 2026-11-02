@@ -62,7 +62,7 @@ export function SignalsPage() {
     if (res && res.success) {
       const s = res.changed === 1 ? '' : 's'
       toast(status === 'confirmed'
-        ? `Confirmed ${res.changed} signal${s} — Harvey will collect ${res.changed === 1 ? 'it' : 'them'} from now on.`
+        ? `Confirmed ${res.changed} signal${s} — Roadie Crew will collect ${res.changed === 1 ? 'it' : 'them'} from now on.`
         : `${res.changed} signal${s} turned off.`, 'success')
     } else {
       toast(failMsg(res, 'Could not update that signal.'), 'error')
@@ -73,7 +73,7 @@ export function SignalsPage() {
 
   const head = (
     <SectionHead title="Signals">
-      Harvey proposes what it knows how to look for. You decide what actually defines a good prospect; nothing is collected until you confirm it.
+      Roadie Crew proposes what it knows how to look for. You decide what actually defines a good prospect; nothing is collected until you confirm it.
     </SectionHead>
   )
   if (data === undefined) return <>{head}<Skeleton /></>

@@ -96,7 +96,7 @@ export function CompaniesPage() {
 
   return (
     <>
-      <SectionHead title="Companies">Organizations Harvey has researched. Click a row to see its contacts.</SectionHead>
+      <SectionHead title="Companies">Organizations Roadie Crew has researched. Click a row to see its contacts.</SectionHead>
       {drill ? <Drill company={drill} onBack={() => setDrill(null)} /> : <>
         {adding
           ? <AddCompany onClose={() => setAdding(false)} onAdded={() => setVersion(v => v + 1)} />

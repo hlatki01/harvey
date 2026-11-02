@@ -12,7 +12,7 @@ const Title = ({ children }: { children: React.ReactNode }) =>
 function label(m: Msg): string {
   if (m.who === 'lead') return 'They wrote'
   if (m.who === 'team') return 'You wrote'
-  if (m.kind === 'reply') return 'Harvey answered'
+  if (m.kind === 'reply') return 'Roadie Crew answered'
   return m.step === 1 ? 'First message' : `Follow-up ${(m.step || 2) - 1}`
 }
 
@@ -49,7 +49,7 @@ function HandSend({ c, r, onChanged }: { c: Campaign; r: Recipient; onChanged: (
         <label className="inline-flex cursor-pointer items-center gap-1.5">
           <input type="checkbox" checked onChange={() => markSent(r, false)} /> Sent by you
         </label>
-        <p className="text-[12px] text-text-2">Harvey won't send follow-ups to people you emailed yourself. Send them from here:</p>
+        <p className="text-[12px] text-text-2">Roadie Crew won't send follow-ups to people you emailed yourself. Send them from here:</p>
         <div className="flex flex-wrap gap-2">
           {steps.slice(1).map((s, i) => (
             <Button key={i} size="sm" variant="ghost" onClick={() => openInGmail(c, s, r)}>Follow-up {i + 1} in Gmail</Button>

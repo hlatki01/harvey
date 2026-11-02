@@ -171,7 +171,7 @@ export function CampaignsPage() {
     }
   }, [data, byTab, tab])
 
-  const head = <SectionHead title="Campaigns">Email and WhatsApp sequences Harvey has written, and where each person stands.</SectionHead>
+  const head = <SectionHead title="Campaigns">Email and WhatsApp sequences Roadie Crew has written, and where each person stands.</SectionHead>
   if (data === undefined) return <>{head}<Skeleton /></>
   if (!data) return <>{head}<OfflineState /></>
 
@@ -193,8 +193,8 @@ export function CampaignsPage() {
       {!campaign ? (
         <EmptyState icon={tab === 'whatsapp' ? <MessageCircle className="size-5" /> : <Mail className="size-5" />} title={`No ${tab === 'whatsapp' ? 'WhatsApp' : 'email'} campaigns yet`}>
           {tab === 'whatsapp'
-            ? 'Every WhatsApp opening joins a campaign once Harvey has written its sequence.'
-            : "The Writer agent hasn't drafted any sequences. It kicks in automatically once Harvey has scored prospects to write for."}
+            ? 'Every WhatsApp opening joins a campaign once Roadie Crew has written its sequence.'
+            : "The Writer agent hasn't drafted any sequences. It kicks in automatically once Roadie Crew has scored prospects to write for."}
         </EmptyState>
       ) : (
         <div className="grid min-h-[480px] gap-4 min-[1101px]:h-[calc(100vh-250px)] min-[1101px]:grid-cols-[minmax(220px,280px)_minmax(260px,360px)_minmax(0,1fr)]">
@@ -216,7 +216,7 @@ export function CampaignsPage() {
                 <Sequence c={campaign} />
               </div>
               <Button variant="ghost" size="sm" className="mt-1 -ml-2" onClick={() => submitFeedback(toast, 'campaign', campaign.id,
-                `What should Harvey do differently in the ${noun}s it writes next? (e.g. "shorter; don't mention reviews")`)}>Feedback</Button>
+                `What should Roadie Crew do differently in the ${noun}s it writes next? (e.g. "shorter; don't mention reviews")`)}>Feedback</Button>
             </div>
             <Scroll>
               {!people.length ? <Muted className="p-3">Nobody in this campaign can be reached.</Muted>

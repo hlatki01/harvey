@@ -98,7 +98,7 @@ function Media({ cid, m, chat, onImage }: { cid: string; m: ChatMsg; chat: Chat;
   )
 }
 
-const WHO: Record<string, string> = { harvey: 'Harvey', team: 'Equipe', team_phone: 'Equipe (celular)' }
+const WHO: Record<string, string> = { harvey: 'Roadie Crew', team: 'Equipe', team_phone: 'Equipe (celular)' }
 
 export function ChatBubbles({ id, first, chat, onImage }: { id: string; first: string; chat: Chat; onImage: (src: string) => void }) {
   return (

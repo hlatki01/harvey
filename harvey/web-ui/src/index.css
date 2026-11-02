@@ -16,19 +16,19 @@
   font-display: swap; src: url('/static/fonts/newsreader.woff2') format('woff2');
 }
 
-/* One accent (cobalt) for the primary action and the current page. Status hues
+/* One accent (sky blue) for the primary action and the current page. Status hues
    appear only on status, so colour always means something. Light and dark are
    the same design re-tokenised; "auto" follows the OS until a theme is chosen. */
 :root {
   --bg: #F6F6F7; --surface: #FFFFFF; --surface-2: #F3F3F4; --surface-3: #EBEBED;
   --line: #E7E7EA; --line-strong: #D6D6DB;
   --text: #111113; --text-2: #5B5B63; --text-3: #8B8B93;
-  --accent: #1D4ED8; --accent-hover: #1E40AF; --accent-text: #FFFFFF;
-  --accent-soft: #EBF1FE; --accent-line: #CCDBFC; --chart-muted: #BCD0FA;
+  --accent: #0273B0; --accent-hover: #025F92; --accent-text: #FFFFFF;
+  --accent-soft: #EAF5FC; --accent-line: #BAE3F6; --chart-muted: #A8DAF2;
   --good: #1F7A4D; --good-bg: #E8F6EE; --good-line: #C6EAD5;
   --wait: #8A5A00; --wait-bg: #FFF4DE; --wait-line: #F6DFAE;
   --bad: #B4232F; --bad-bg: #FDECEE; --bad-line: #F7CDD2;
-  --active: #0E7490; --active-bg: #E5F6F9; --active-line: #BDE5EE;
+  --active: #0F766E; --active-bg: #E6F6F4; --active-line: #B9E6E0;
   --note: #6A3FB0; --note-bg: #F2ECFC; --note-line: #DFD1F6;
   --shadow-border: 0 0 0 1px rgb(17 17 19 / 0.06), 0 1px 2px -1px rgb(17 17 19 / 0.06), 0 2px 4px 0 rgb(17 17 19 / 0.04);
   --shadow-pop: 0 0 0 1px rgb(17 17 19 / 0.08), 0 12px 32px -8px rgb(17 17 19 / 0.18);
@@ -39,12 +39,12 @@
   --bg: #0E0E10; --surface: #161618; --surface-2: #1D1D20; --surface-3: #26262A;
   --line: #26262A; --line-strong: #34343A;
   --text: #F3F3F5; --text-2: #A3A3AC; --text-3: #6E6E77;
-  --accent: #3D6FF5; --accent-hover: #5A85FF; --accent-text: #FFFFFF;
-  --accent-soft: #111C36; --accent-line: #1E3366; --chart-muted: #22365F;
+  --accent: #38BDF8; --accent-hover: #7DD3FC; --accent-text: #06243A;
+  --accent-soft: #0B2433; --accent-line: #12405A; --chart-muted: #164B66;
   --good: #5CCB8F; --good-bg: #10261B; --good-line: #1C4130;
   --wait: #F0B84F; --wait-bg: #2A2010; --wait-line: #4A3817;
   --bad: #FF7A85; --bad-bg: #2C1316; --bad-line: #4C1F25;
-  --active: #4CC3D9; --active-bg: #0C2328; --active-line: #164049;
+  --active: #2DD4BF; --active-bg: #0B2522; --active-line: #134440;
   --note: #B79BF5; --note-bg: #1E1730; --note-line: #352857;
   --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.07);
   --shadow-pop: 0 0 0 1px rgb(255 255 255 / 0.09), 0 16px 40px -8px rgb(0 0 0 / 0.6);
@@ -56,12 +56,12 @@
     --bg: #0E0E10; --surface: #161618; --surface-2: #1D1D20; --surface-3: #26262A;
     --line: #26262A; --line-strong: #34343A;
     --text: #F3F3F5; --text-2: #A3A3AC; --text-3: #6E6E77;
-    --accent: #3D6FF5; --accent-hover: #5A85FF; --accent-text: #FFFFFF;
-    --accent-soft: #111C36; --accent-line: #1E3366; --chart-muted: #22365F;
+    --accent: #38BDF8; --accent-hover: #7DD3FC; --accent-text: #06243A;
+    --accent-soft: #0B2433; --accent-line: #12405A; --chart-muted: #164B66;
     --good: #5CCB8F; --good-bg: #10261B; --good-line: #1C4130;
     --wait: #F0B84F; --wait-bg: #2A2010; --wait-line: #4A3817;
     --bad: #FF7A85; --bad-bg: #2C1316; --bad-line: #4C1F25;
-    --active: #4CC3D9; --active-bg: #0C2328; --active-line: #164049;
+    --active: #2DD4BF; --active-bg: #0B2522; --active-line: #134440;
     --note: #B79BF5; --note-bg: #1E1730; --note-line: #352857;
     --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.07);
     --shadow-pop: 0 0 0 1px rgb(255 255 255 / 0.09), 0 16px 40px -8px rgb(0 0 0 / 0.6);
@@ -140,6 +140,7 @@
 }
 @keyframes marquee { from { transform: translateX(0); } to { transform: translateX(calc(-100% - var(--gap))); } }
 @keyframes border-beam { 100% { offset-distance: 100%; } }
+@keyframes page-in { from { opacity: 0; } }
 @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
 html { -webkit-text-size-adjust: 100%; }

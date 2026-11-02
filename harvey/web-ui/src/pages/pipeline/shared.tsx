@@ -85,8 +85,8 @@ export async function submitFeedback(
   })
   if (data && data.success) {
     toast(entityType === 'campaign'
-      ? 'Saved. Harvey follows it in the emails it writes from now on.'
-      : "Saved. Harvey uses it if it writes this person's first email (Gmail, SMTP or Microsoft 365).", 'success')
+      ? 'Saved. Roadie Crew follows it in the emails it writes from now on.'
+      : "Saved. Roadie Crew uses it if it writes this person's first email (Gmail, SMTP or Microsoft 365).", 'success')
   } else {
     toast((data && data.message) || failMsg(data, 'Could not save feedback.'), 'error')
   }

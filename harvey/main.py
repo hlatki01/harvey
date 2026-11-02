@@ -127,7 +127,7 @@ def unusable_backlog_notice(summary: dict) -> str:
     if writable or recent < PROSPECT_BACKLOG:
         return ""
     return (
-        f"Harvey found {recent} prospects in the last day, but none has a verified "
+        f"Roadie Crew found {recent} prospects in the last day, but none has a verified "
         "or catch-all email, so it paused prospecting for about a day to save search "
         "and verifier credits. Add an email verifier key (REOON_API_KEY, "
         "ZEROBOUNCE_API_KEY or HUNTER_API_KEY in .env) or check it still has credits. "
@@ -355,7 +355,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 )
                 await notify.push(state, config, "system",
                                   f"system:brain:{datetime.now().date().isoformat()}",
-                                  f"Harvey: the model is paused. {problem}")
+                                  f"Roadie Crew: the model is paused. {problem}")
                 if await _interruptible_sleep(interval, stop_event):
                     break
                 continue

@@ -13,8 +13,8 @@ const FIELDS: [keyof Prospect & string, string, string][] = [
 const GRADE: Record<string, string> = {
   verified: 'Email verified: it can get cold email.',
   risky: 'Email accepted, but the domain takes any address: sent only if you allow risky ones.',
-  guess: "Email couldn't be verified, so Harvey won't send cold email to it.",
-  invalid: 'That email address bounces: Harvey won\'t use it.',
+  guess: "Email couldn't be verified, so Roadie Crew won't send cold email to it.",
+  invalid: 'That email address bounces: Roadie Crew won\'t use it.',
 }
 
 /** Add a person at a company, or edit one. Emails are graded like any
@@ -66,7 +66,7 @@ export function ContactDialog({ companyId, contact, onClose, onSaved }: {
             </Field>
           ))}
         </div>
-        <p className="mt-3 text-[12px] text-text-3">A new email is checked with your verifier before Harvey ever sends to it.</p>
+        <p className="mt-3 text-[12px] text-text-3">A new email is checked with your verifier before Roadie Crew ever sends to it.</p>
         <div className="mt-4 flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
           <Button type="submit" variant="primary" disabled={saving || unchanged}>{saving ? 'Saving…' : contact ? 'Save' : 'Add contact'}</Button>

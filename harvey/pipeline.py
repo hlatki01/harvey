@@ -317,5 +317,5 @@ Return ONLY JSON: {{"city": "Name, UF", "radius_km": 10 to 50 by the city's size
     await state.log_action("city_added", "discovery", {"city": city, "coordinate": coordinate, "why": why})
     logger.info("Auto discovery: added %s (%s)", city, why)
     await notify.push(state, config, "system", f"city:{city}",
-                      f"Harvey: adicionei {city} à busca de empresas. {why}")
+                      f"Roadie Crew: adicionei {city} à busca de empresas. {why}")
     return city

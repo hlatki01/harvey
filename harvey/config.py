@@ -425,7 +425,7 @@ class ComplianceConfig(BaseModel):
             )
         if not _ASKS_FOR_OPT_OUT_RE.search(v):
             raise ValueError(
-                "opt_out_line must ask for a reply Harvey recognises as an opt-out, "
+                "opt_out_line must ask for a reply Roadie Crew recognises as an opt-out, "
                 'e.g. Reply "no thanks" / Reply STOP / Responda "sair". Recognised: '
                 + ", ".join(f'"{w}"' for w in OPT_OUT_WORDS) + "."
             )
@@ -469,7 +469,7 @@ def compliance_notice(config) -> str:
     return (
         "Cold emails are going out without " + " or ".join(missing) + ". US law "
         "(CAN-SPAM) requires both in every cold email. Set them in harvey.yaml "
-        "(or harvey.local.yaml if you trained Harvey)."
+        "(or harvey.local.yaml if you trained Roadie Crew)."
     )
 
 

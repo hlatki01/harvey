@@ -730,7 +730,7 @@ class Handler:
                     # shows up as delays: once a day, make sure a person hears about them.
                     await notify.push(self.state, self.config, "system",
                                       f"system:mail-delayed:{date.today().isoformat()}",
-                                      f"Harvey: the mail server is holding outgoing email "
+                                      f"Roadie Crew: the mail server is holding outgoing email "
                                       f"(\"{msg.subject[:80]}\"). If this repeats, check its queue.")
                 elif msg.is_bounce:
                     await self._handle_bounce(msg)
@@ -979,7 +979,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
         product = self.config.product
         return await self.calendar.book_meeting(
             slot, summary=f"{product.name}: {notify._who(prospect)}",
-            description=f"Booked by Harvey from the {convo.channel} conversation.",
+            description=f"Booked by Roadie Crew from the {convo.channel} conversation.",
             attendee_email=prospect.email)
 
     def _booked_text(self, prospect, convo, slot: dict, meeting: dict) -> str:
@@ -1001,7 +1001,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
                      "event_id": meeting.get("id", ""), "link": meeting.get("link", "")})
         logger.info(f"Handler: meeting booked with {notify._who(prospect)} for {when}.")
         await notify.push(self.state, self.config, "meeting", f"meeting:{convo.id}:{slot['start']}",
-                          f"Harvey: meeting booked with {notify._who(prospect)} for {when}. "
+                          f"Roadie Crew: meeting booked with {notify._who(prospect)} for {when}. "
                           f"{meeting.get('link', '')}".strip(), self.whatsapp)
 
     async def _hand_over(self, prospect, convo, reply_text: str):
@@ -1033,8 +1033,8 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
         if announce:     # they said they'd get back: worth knowing; a plain nudge isn't
             await notify.push(
                 self.state, self.config, "hot_lead", f"defer:{convo.id}:{due}",
-                f"Harvey: {prospect.company or prospect.phone} will get back to you. "
-                f"Harvey follows up {at.astimezone(pytz.timezone(self.config.usage.quiet_hours.timezone)):%d/%m %H:%M} if they stay quiet."
+                f"Roadie Crew: {prospect.company or prospect.phone} will get back to you. "
+                f"Roadie Crew follows up {at.astimezone(pytz.timezone(self.config.usage.quiet_hours.timezone)):%d/%m %H:%M} if they stay quiet."
                 + notify.conversation_link(self.config, convo.id), self.whatsapp)
         return due
 
@@ -1126,7 +1126,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
             text = await self._write_follow_up(prospect, convo)
             if not text:
                 await self.state.update_conversation(convo.id, follow_up_at="")
-                await self._hand_over(prospect, convo, "Harvey could not write the follow-up.")
+                await self._hand_over(prospect, convo, "Roadie Crew could not write the follow-up.")
                 continue
             await self._queue_whatsapp_reply(text, prospect, convo, "question", action="answer")
             await self._schedule_follow_up(prospect, convo, sent=convo.follow_ups + 1)

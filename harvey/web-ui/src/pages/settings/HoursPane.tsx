@@ -36,7 +36,7 @@ function HoursForm({ data, reload }: { data: Data; reload: () => Promise<void> }
   async function save() {
     const days = Object.fromEntries(DAYS.map(([d]) => [d, rows[d].open ? `${rows[d].start}-${rows[d].end}` : '']))
     const r = await post<{ success?: boolean; message?: string; harvey_running?: boolean }>('/api/settings/business-hours', { days, holidays_country: country })
-    if (r && r.success) toast('Hours saved. Harvey uses them from its next cycle.', 'success')
+    if (r && r.success) toast('Hours saved. Roadie Crew uses them from its next cycle.', 'success')
     else toast((r && r.message) || 'Save failed — is the dashboard still running?', 'error')
     await reload()
   }
@@ -45,7 +45,7 @@ function HoursForm({ data, reload }: { data: Data; reload: () => Promise<void> }
     <Card>
       <Row
         title="Business hours"
-        desc={<>Harvey sends email and WhatsApp only inside these hours ({data.timezone}). Anything due outside them waits for the next opening. Your own sends from the dashboard are not held. {unset && <>Not saved yet: Harvey currently sends at any time. </>}Saved to <code className={code}>usage.business_hours</code> in your config.</>}
+        desc={<>Roadie Crew sends email and WhatsApp only inside these hours ({data.timezone}). Anything due outside them waits for the next opening. Your own sends from the dashboard are not held. {unset && <>Not saved yet: Roadie Crew currently sends at any time. </>}Saved to <code className={code}>usage.business_hours</code> in your config.</>}
       >
         <div className="space-y-2">
           {DAYS.map(([d, label]) => (

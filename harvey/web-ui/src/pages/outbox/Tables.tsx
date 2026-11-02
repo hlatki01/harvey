@@ -154,7 +154,7 @@ function FollowUps() {
   const { data } = useApi<{ rows: FollowUp[]; total: number }>(`/api/outbox/follow-ups?q=${encodeURIComponent(q)}`, { interval: 15000 })
   if (!data) return null
   if (!data.total && !q) {
-    return <p className="py-6 text-center text-[13px] text-text-2">No follow-ups planned. When a lead says they'll get back to you, Harvey plans one here.</p>
+    return <p className="py-6 text-center text-[13px] text-text-2">No follow-ups planned. When a lead says they'll get back to you, Roadie Crew plans one here.</p>
   }
   const open = (r: FollowUp) => goTab('conversations', { conversation: r.conversation_id })
   return (

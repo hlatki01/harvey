@@ -24,7 +24,7 @@ export function CategoriesPage() {
 
   const head = (
     <SectionHead title="Categories">
-      Each kind of business and the example site Harvey shows it. A company gets the <b>first</b> category with
+      Each kind of business and the example site Roadie Crew shows it. A company gets the <b>first</b> category with
       one of its keywords in the company's industry, so put specific ones (Odontologia) before generic ones (Clínica).
     </SectionHead>
   )
@@ -37,7 +37,7 @@ export function CategoriesPage() {
     const r = await post<{ success?: boolean; message?: string }>('/api/settings/demos',
       { demos: next.map(({ label, url, keywords }) => ({ label, url, keywords })) })
     setSaving(false)
-    if (r && r.success) { toast(`${done} Harvey uses it from its next cycle.`, 'success'); refetch(); return true }
+    if (r && r.success) { toast(`${done} Roadie Crew uses it from its next cycle.`, 'success'); refetch(); return true }
     toast((r && r.message) || 'Could not save it.', 'error')
     return false
   }
@@ -52,7 +52,7 @@ export function CategoriesPage() {
       {head}
       <Button size="sm" className="mb-4" onClick={() => setEditing(null)}><Plus className="size-3.5" aria-hidden />Add a category</Button>
       {!demos.length
-        ? <EmptyState icon={<LayoutGrid className="size-5" />} title="No categories yet">Add one with its demo site, and Harvey offers it to the businesses it fits.</EmptyState>
+        ? <EmptyState icon={<LayoutGrid className="size-5" />} title="No categories yet">Add one with its demo site, and Roadie Crew offers it to the businesses it fits.</EmptyState>
         : (
           <TableCard>
             <table className="w-full text-[13px]">
@@ -100,7 +100,7 @@ export function CategoriesPage() {
         <>
           <Subhead hint={data.unmatched_total}>Companies with no category</Subhead>
           <Card>
-            <p className="mb-2 text-[13px] text-text-2">These industries match no keyword, so Harvey has no example site to offer them. Add a keyword to a category, or a new category.</p>
+            <p className="mb-2 text-[13px] text-text-2">These industries match no keyword, so Roadie Crew has no example site to offer them. Add a keyword to a category, or a new category.</p>
             <div className="flex flex-wrap gap-1.5">
               {data.unmatched.map(u => <span key={u.industry} className="rounded-xs bg-surface-2 px-1.5 py-px text-[12px]">{u.industry} <span className="text-text-3">{u.n}</span></span>)}
             </div>

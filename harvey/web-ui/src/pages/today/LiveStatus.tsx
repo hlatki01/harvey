@@ -29,7 +29,7 @@ export function LiveStatus() {
   const cur = last.current
   if (!cur) {
     return stale
-      ? <Muted>Can't reach Harvey right now. Is the dashboard window still open?</Muted>
+      ? <Muted>Can't reach Roadie Crew right now. Is the dashboard window still open?</Muted>
       : <div aria-busy="true" className="h-24 animate-pulse rounded-md bg-surface-2" />
   }
   const d = cur.d
@@ -79,7 +79,7 @@ export function LiveStatus() {
       )}
       <div className={cn('mt-2 text-[12px]', stale ? 'text-bad' : 'text-text-3')} role={stale ? 'alert' : undefined}>
         {stale
-          ? "Can't reach Harvey right now — numbers below may be old."
+          ? "Can't reach Roadie Crew right now — numbers below may be old."
           : `Updated ${cur.at.toLocaleTimeString()} · refreshes every 10 seconds`}
       </div>
     </div>

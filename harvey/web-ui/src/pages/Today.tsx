@@ -55,7 +55,7 @@ function Queue({ data }: { data: TodayData | null | undefined }) {
   // A failed check must never read as "Nothing needs you".
   if (data.error) {
     return <EmptyState icon={<AlertTriangle className="size-5" />} title="Couldn't check what needs you">
-      The dashboard hit an error reading Harvey's data: {data.error}
+      The dashboard hit an error reading Roadie Crew's data: {data.error}
     </EmptyState>
   }
   const items = data.items || []
@@ -65,7 +65,7 @@ function Queue({ data }: { data: TodayData | null | undefined }) {
         <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-good-bg text-good"><Check className="size-4" aria-hidden /></span>
         <div>
           <div className="font-medium">Nothing needs you</div>
-          <div className="text-text-2">Harvey has everything it needs. Anything that requires a decision — an email to approve, a signal to confirm — shows up here.</div>
+          <div className="text-text-2">Roadie Crew has everything it needs. Anything that requires a decision — an email to approve, a signal to confirm — shows up here.</div>
         </div>
       </div>
     )
@@ -102,7 +102,7 @@ function RecentActivity() {
       <Card>
         {shown.length
           ? shown.map((a, i) => <TimelineItem key={i} a={a} time={relTime(a.created_at)} />)
-          : <Muted>Nothing yet. Every action Harvey takes shows up here.</Muted>}
+          : <Muted>Nothing yet. Every action Roadie Crew takes shows up here.</Muted>}
       </Card>
     </>
   )

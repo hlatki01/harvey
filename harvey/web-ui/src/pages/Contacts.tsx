@@ -39,14 +39,14 @@ export function ContactsPage() {
       <CsvButton path="/api/export/prospects.csv" filename="prospects.csv">Export deliverable</CsvButton>
       <CsvButton variant="ghost" path="/api/export/prospects.csv?all=true" filename="prospects-all.csv">Export all</CsvButton>
     </>}>
-      People Harvey has found, how sure it is of their address, and where each one stands.
+      People Roadie Crew has found, how sure it is of their address, and where each one stands.
     </SectionHead>
   )
   if (data === undefined) return <>{head}<Skeleton /></>
   if (!data) return <>{head}<OfflineState /></>
   if (!data.length) {
     return <>{head}<EmptyState icon={<Users className="size-5" />} title="No contacts yet">
-      Harvey hasn't found any prospects. Once it's running, the Scout agent searches the web for people matching your ideal customer profile in <b>harvey.yaml</b>.
+      Roadie Crew hasn't found any prospects. Once it's running, the Scout agent searches the web for people matching your ideal customer profile in <b>harvey.yaml</b>.
     </EmptyState></>
   }
 
@@ -101,7 +101,7 @@ export function ContactsPage() {
                   <td className={TD + ' text-text-2'}>{relTime(p.created_at)}</td>
                   <td className={TD}>
                     <Button variant="ghost" size="sm" title="Leave feedback on this contact"
-                      onClick={() => submitFeedback(toast, 'contact', p.id, 'Anything Harvey should know before writing to this person?')}>Feedback</Button>
+                      onClick={() => submitFeedback(toast, 'contact', p.id, 'Anything Roadie Crew should know before writing to this person?')}>Feedback</Button>
                   </td>
                 </tr>
               ))}

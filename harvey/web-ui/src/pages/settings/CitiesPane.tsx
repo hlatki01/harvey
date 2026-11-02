@@ -45,17 +45,17 @@ function AddedCities({ geo, reload }: { geo: Geo; reload: () => Promise<void> })
   const toast = useToast()
   async function remove(name: string) {
     const r = await api<{ success?: boolean; message?: string }>('/api/settings/geography/added/' + encodeURIComponent(name), { method: 'DELETE' })
-    if (r && r.success) toast(`${name} taken out. Harvey won't search it or suggest it again.`, 'success')
+    if (r && r.success) toast(`${name} taken out. Roadie Crew won't search it or suggest it again.`, 'success')
     else toast((r && r.message) || 'Could not take it out.', 'error')
     await reload()
   }
   return (
     <Card className="mt-4">
       <Row
-        title="Cities Harvey added"
+        title="Cities Roadie Crew added"
         desc={geo.expand
-          ? <>When the cities above run short of new businesses, Harvey adds the next one itself, at most {geo.per_week} a week, and tells you on WhatsApp. Take out any you don't want: it never comes back.</>
-          : <>Off. Turn on <code className={code}>discovery.expand_cities</code> and Harvey adds the next city itself when these run short of new businesses.</>}
+          ? <>When the cities above run short of new businesses, Roadie Crew adds the next one itself, at most {geo.per_week} a week, and tells you on WhatsApp. Take out any you don't want: it never comes back.</>
+          : <>Off. Turn on <code className={code}>discovery.expand_cities</code> and Roadie Crew adds the next city itself when these run short of new businesses.</>}
       >
         {geo.added.length ? (
           <div className="space-y-3">
@@ -85,7 +85,7 @@ function CitiesForm({ initial, yields, reload }: { initial: City[]; yields: Reco
     const cities = rows.filter(r => r.name.trim())
     if (!cities.length) return toast('Keep at least one city.', 'error')
     const r = await post<{ success?: boolean; message?: string; harvey_running?: boolean }>('/api/settings/geography', { cities })
-    if (r && r.success) toast('Cities saved. Harvey uses them from its next cycle.', 'success')
+    if (r && r.success) toast('Cities saved. Roadie Crew uses them from its next cycle.', 'success')
     else toast((r && r.message) || 'Save failed — is the dashboard still running?', 'error')
     await reload()
   }

@@ -87,14 +87,14 @@ async def on_stage_change(state, config, prospect, convo, old_stage: str, reply_
     if convo.stage not in _settings(config).hot_stages:
         return
     await push(state, config, "hot_lead", f"hot:{convo.id}:{convo.stage}",
-               f"Harvey: hot lead, {_who(prospect)} is now {convo.stage} ({convo.channel}).\n"
+               f"Roadie Crew: hot lead, {_who(prospect)} is now {convo.stage} ({convo.channel}).\n"
                f"\"{reply_text[:300]}\"" + conversation_link(config, convo.id), client)
 
 
 async def push_handoff(state, config, prospect, convo, reply_text: str, client=None) -> None:
     # One push per conversation: a chat handed over twice is still the same chat on your list.
     await push(state, config, "handoff", f"handoff:{convo.id}",
-               f"Harvey: {_who(prospect)} needs you ({convo.channel}).\n\"{reply_text[:300]}\""
+               f"Roadie Crew: {_who(prospect)} needs you ({convo.channel}).\n\"{reply_text[:300]}\""
                + conversation_link(config, convo.id), client)
 
 
@@ -110,7 +110,7 @@ async def state_alerts(state) -> list[tuple]:
             thread = []
         last = next((m["content"] for m in reversed(thread) if m.get("sender") == "prospect"), "")
         raised.append((f"handoff:{c['id']}", f"{_who(c)} needs you",
-                       last[:140] or "Harvey handed this conversation over.",
+                       last[:140] or "Roadie Crew handed this conversation over.",
                        "bad", "conversations", c["id"], str(len(thread))))
     pending = await state.get_outbox(status="pending_review", limit=500)
     if pending:
@@ -137,7 +137,7 @@ async def push_alerts(state, config, client=None) -> None:
             title, detail = await approvals_preview(state)
         else:
             event, push_key = "system", f"{key}:{date.today().isoformat()}"
-        await push(state, config, event, push_key, f"Harvey: {title}. {detail}", client)
+        await push(state, config, event, push_key, f"Roadie Crew: {title}. {detail}", client)
 
 
 PREVIEWS = 5
@@ -172,15 +172,15 @@ async def owner_command(state, text: str) -> str | None:
     if code in ("all", "todos", "tudo"):
         if not approve:
             return None   # rejecting everything from a chat is too easy to fat-finger
-        return f"Harvey: approved {await state.approve_outbox()} message(s)."
+        return f"Roadie Crew: approved {await state.approve_outbox()} message(s)."
     matches = [i for i in await state.get_outbox(status="pending_review", limit=500)
                if i["id"].startswith(code)]
     if len(matches) != 1:
-        return f"Harvey: no single pending message with code {code}."
+        return f"Roadie Crew: no single pending message with code {code}."
     item_id = matches[0]["id"]
     if approve:
         ok = await state.approve_outbox(item_id)
     else:
         ok = await state.reject_outbox_item(item_id)
     verb = "approved" if approve else "rejected"
-    return f"Harvey: {code} {verb}." if ok else f"Harvey: {code} was already handled."
+    return f"Roadie Crew: {code} {verb}." if ok else f"Roadie Crew: {code} was already handled."
