@@ -839,3 +839,16 @@ eval(require('fs').readFileSync(process.argv[1], 'utf8') +
 
 
 
+
+
+def test_a_bodyless_mutation_forwarded_chunked_by_the_tunnel_works(authed):
+    # cloudflared over HTTP/2 sends an empty POST with Transfer-Encoding: chunked and no type.
+    def empty():
+        yield b""
+    r = authed.post("/api/sending/pause", content=empty())
+    assert r.request.headers.get("transfer-encoding") == "chunked"
+    assert r.json()["success"]
+    r = authed.post("/api/settings/env", content=(b for b in [b"SMTP_HOST=x"]),
+                    headers={"Content-Type": "text/plain"})
+    assert r.status_code == 415                       # a typed body still has to be JSON
+    authed.post("/api/sending/resume")

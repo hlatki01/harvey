@@ -414,8 +414,13 @@ class DashboardGuard:
             """Mutations carry JSON or nothing. True when it already refused."""
             if method in _UNSAFE_METHODS:
                 length = headers.get("content-length", ["0"])[0].strip()
-                has_body = bool(headers.get("transfer-encoding")) or length not in ("", "0")
-                if has_body and not _is_json(headers.get("content-type", [""])[0]):
+                kind = headers.get("content-type", [""])[0]
+                # A tunnel over HTTP/2 (cloudflared) forwards even an empty
+                # POST as chunked: with no content type there, it isn't a form
+                # or text body, so only a typed chunked body counts as one.
+                chunked = bool(headers.get("transfer-encoding")) and bool(kind.strip())
+                has_body = chunked or length not in ("", "0")
+                if has_body and not _is_json(kind):
                     await deny(415, "unsupported_media_type",
                                "Request bodies must be application/json.")
                     return True
