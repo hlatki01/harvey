@@ -1445,3 +1445,30 @@ def test_business_days_skip_weekends_and_holidays():
     # Fri 30 Oct 2026, afternoon: Sat 31 is open, Sun closed, Mon 2 Nov is Finados.
     at = business_days_later(config, 2, datetime(2026, 10, 30, 18, 0, tzinfo=tz.utc))
     assert at.strftime("%Y-%m-%d %H:%M") == "2026-11-03 09:00"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_needs_no_answer_still_gets_a_follow_up(state):
+    await _contacted_prospect(state)
+    client = FakeEvolution()
+    client.inbound = [WhatsAppInbound("M1", "5511987654321", ".")]
+    handler = _handler(state, client, StubBrain(intent="question", action="wait", text=""))
+    await handler.run_whatsapp()
+    [convo] = await state.get_conversations_by_status("open")
+    assert await state.get_outbox(channel="whatsapp") == [] and convo.follow_up_at
+
+
+@pytest.mark.asyncio
+async def test_a_chat_left_on_our_last_word_gets_its_remaining_follow_up(state):
+    pid = await _contacted_prospect(state)
+    old = datetime(2026, 10, 30, 17, 0)
+    convo = Conversation(id="", prospect_id=pid, channel="whatsapp", status="open", thread=[
+        Message(sender="prospect", content="Pode ser", timestamp=old),
+        Message(sender="team", content="Segue o modelo", timestamp=old),
+        Message(sender="harvey", content="Conseguiu ver o modelo?", timestamp=old)])
+    await state.add_conversation(convo)
+    handler = _handler(state, FakeEvolution(), StubBrain(text="Oi! Sigo por aqui quando fizer sentido."))
+    await handler.follow_up_due()
+    [convo] = await state.get_conversations_by_status("open")
+    assert convo.follow_ups == 1          # the reminder already sent counts: one light nudge left
+    assert convo.follow_up_at             # planned (overdue ones go out on this or the next cycle)

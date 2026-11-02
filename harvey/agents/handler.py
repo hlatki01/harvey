@@ -630,6 +630,9 @@ class Handler:
                 details={"prospect_phone": prospect.phone, "action": "wait",
                          "reason": decision.reason, "reply_preview": reply_text[:200]})
             logger.info(f"Handler: {lead_email} needs no answer ({decision.reason or 'wait'}).")
+            if channel == "whatsapp" and decision.sender != "automatic":
+                # An "ok" or a "." needs no answer, but the chat mustn't just die there.
+                await self._schedule_follow_up(prospect, convo)
             return
 
         # For interested, objection, question, wrong_person — the reply drafted above
@@ -659,7 +662,7 @@ class Handler:
                          "confidence": decision.confidence, "reason": decision.reason,
                          "overridden": decision.overridden, "reply_preview": reply_text[:200]})
             if decision.action == "defer":
-                await self._schedule_follow_up(prospect, convo, decision.follow_up_days)
+                await self._schedule_follow_up(prospect, convo, decision.follow_up_days, announce=True)
             if decision.action == "handoff":
                 # The knowledge base ran out, or they want a person: put the
                 # chat on the dashboard's "needs you" list and stop answering.
@@ -1001,7 +1004,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
     # ── Follow-ups for a lead who said they'd get back ──
 
     async def _schedule_follow_up(self, prospect, convo, days: int = 0, since=None,
-                                  sent: int = 0) -> str:
+                                  sent: int = 0, announce: bool = False) -> str:
         """Nudge them if they stay quiet: `days` they named (calendar days),
         else FOLLOW_UP_BUSINESS_DAYS[sent] working days, always inside
         business hours. Returns the time, naive UTC."""
@@ -1018,7 +1021,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
             action_type="follow_up_scheduled", agent="handler",
             details={"conversation_id": convo.id, "prospect_phone": prospect.phone,
                      "follow_up_at": due, "attempt": sent + 1})
-        if not sent and since is None:     # live chat; a hand-back is the team's own doing
+        if announce:     # they said they'd get back: worth knowing; a plain nudge isn't
             await notify.push(
                 self.state, self.config, "hot_lead", f"defer:{convo.id}:{due}",
                 f"Harvey: {prospect.company or prospect.phone} will get back to you. "
@@ -1041,7 +1044,8 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
             await self.state.cancel_pending_outbox_for_prospect(prospect.id, reason="replaced by follow-up")
             return {"next": "follow_up", "follow_up_at": await self._due_from(prospect, convo, since)}
         decision = await self._decide_whatsapp("", last.content, prospect, convo)
-        if decision.action == "defer":
+        if decision.action == "defer" or (decision.action == "wait" and decision.sender != "automatic"
+                                          and decision.intent not in INTENTS_THAT_CLOSE):
             return {"next": "follow_up",
                     "follow_up_at": await self._due_from(prospect, convo, since, decision.follow_up_days)}
         if decision.action == "handoff":
@@ -1062,9 +1066,35 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
             await self.state.update_conversation(convo.id, follow_up_at=due)
         return due
 
+    async def _plan_silent_chats(self) -> int:
+        """Open chats where we spoke last, nothing is queued and no follow-up
+        is planned (written before follow-ups existed, or a team reply): plan
+        one, counting our messages since their last as nudges already sent."""
+        planned = 0
+        for convo in await self.state.get_conversations_by_status("open"):
+            if (convo.channel != "whatsapp" or convo.follow_up_at or convo.intent == "ooo"
+                    or not convo.thread or convo.thread[-1].sender == "prospect" or not convo.prospect_id):
+                continue
+            prospect = await self.state.get_prospect(convo.prospect_id)
+            if not prospect or not prospect.phone or prospect.status == "opted_out":
+                continue
+            if await self.state.has_queued_outbox(prospect.id):
+                continue
+            ours = 0
+            for m in reversed(convo.thread):
+                if m.sender == "prospect":
+                    break
+                ours += 1
+            nudged = min(max(ours - 1, convo.follow_ups), FOLLOW_UP_MAX)
+            since = convo.thread[-1].timestamp.replace(tzinfo=timezone.utc)
+            await self._schedule_follow_up(prospect, convo, since=since, sent=nudged)
+            planned += 1
+        return planned
+
     async def follow_up_due(self) -> int:
         """Write and queue the follow-ups that came due, in business hours.
         After FOLLOW_UP_MAX unanswered ones the chat goes back to the team."""
+        await self._plan_silent_chats()
         if closed_until(self.config):
             return 0
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()

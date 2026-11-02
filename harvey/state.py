@@ -1152,6 +1152,14 @@ class StateManager:
             await db.commit()
             return item_id if cursor.rowcount > 0 else None
 
+    async def has_queued_outbox(self, prospect_id: str) -> bool:
+        """Anything still waiting to go out to this person."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM outbox WHERE prospect_id = ? "
+                "AND status IN ('pending_review', 'approved', 'sending') LIMIT 1", (prospect_id,)) as cursor:
+                return await cursor.fetchone() is not None
+
     async def get_outbox(
         self,
         status: str | None = None,
