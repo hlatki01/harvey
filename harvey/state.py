@@ -516,6 +516,13 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE outbox ADD COLUMN variant TEXT NOT NULL DEFAULT '';
     """,
+    # ── v19: companies deleted on the dashboard, so discovery doesn't bring them back ──
+    """
+    CREATE TABLE IF NOT EXISTS removed_companies (
+        identity TEXT PRIMARY KEY,
+        removed_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -728,6 +735,78 @@ class StateManager:
             ) as cursor:
                 row = await cursor.fetchone()
                 return self._company_from_row(row) if row else None
+
+    COMPANY_EDITABLE = ("name", "industry", "location", "phone", "website")
+
+    async def update_company(self, company_id: str, **fields) -> bool:
+        """Change the fields a person can edit; the domain follows the website."""
+        from harvey.collectors.discover import normalize_domain
+        values = {k: v for k, v in fields.items() if k in self.COMPANY_EDITABLE}
+        if "website" in values:
+            values["domain"] = normalize_domain(values["website"])
+        if not values:
+            return False
+        sets = ", ".join(f"{k} = ?" for k in values)
+        async with self._connect() as db:
+            cur = await db.execute(
+                f"UPDATE companies SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (*values.values(), company_id))
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def remove_company(self, company_id: str) -> str:
+        """Delete a company with its contacts, their unsent messages and its
+        signals, and remember it so discovery doesn't add it back. Refused
+        ("" is success) once anything was sent to it or anyone talked to it:
+        that history isn't Harvey's to throw away."""
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                row = await (await db.execute(
+                    "SELECT domain, external_id FROM companies WHERE id = ?", (company_id,))).fetchone()
+                if not row:
+                    await db.rollback()
+                    return "No such company."
+                people = "SELECT id FROM prospects WHERE company_id = ?"
+                talked = await (await db.execute(
+                    f"SELECT (SELECT COUNT(*) FROM conversations WHERE prospect_id IN ({people}))"
+                    f" + (SELECT COUNT(*) FROM outbox WHERE prospect_id IN ({people})"
+                    "     AND status IN ('sent', 'sending'))", (company_id, company_id))).fetchone()
+                if talked[0]:
+                    await db.rollback()
+                    return "Harvey already wrote to or talked with this business, so it stays (its history would go with it)."
+                await db.execute(f"DELETE FROM outbox WHERE prospect_id IN ({people})", (company_id,))
+                await db.execute(f"DELETE FROM observations WHERE prospect_id IN ({people})", (company_id,))
+                await db.execute("DELETE FROM prospects WHERE company_id = ?", (company_id,))
+                await db.execute("DELETE FROM observations WHERE company_id = ?", (company_id,))
+                await db.execute("DELETE FROM companies WHERE id = ?", (company_id,))
+                for identity in row:
+                    if identity:
+                        await db.execute(
+                            "INSERT OR IGNORE INTO removed_companies (identity) VALUES (?)", (identity,))
+                await db.commit()
+                return ""
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def is_removed_company(self, *identities: str) -> bool:
+        identities = tuple(i for i in identities if i)
+        if not identities:
+            return False
+        async with self._connect() as db:
+            row = await (await db.execute(
+                f"SELECT 1 FROM removed_companies WHERE identity IN ({','.join('?' * len(identities))})",
+                identities)).fetchone()
+            return row is not None
+
+    async def unremove_company(self, *identities: str) -> None:
+        """Added back by hand: discovery may find it again too."""
+        async with self._connect() as db:
+            for identity in identities:
+                if identity:
+                    await db.execute("DELETE FROM removed_companies WHERE identity = ?", (identity,))
+            await db.commit()
 
     async def get_company_by_external_id(self, external_id: str) -> Company | None:
         """Look a company up by its provider-stable id.

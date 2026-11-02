@@ -1004,6 +1004,8 @@ async def run_discovery(
                     if not ident or ident in seen:
                         continue
                     seen.add(ident)
+                    if await state.is_removed_company(biz.domain, biz.external_id):
+                        continue    # deleted on the dashboard: stays deleted
 
                     company_id, is_new = await _upsert(state, biz, query)
                     if is_new:

@@ -611,15 +611,66 @@ async def test_instantly(request: Request):
 # ── Companies ──
 
 
+COMPANIES_PAGE = 25
+# Sortable columns, by the name the table uses; anything else sorts by newest.
+_COMPANY_SORT = {"name": "c.name COLLATE NOCASE", "industry": "c.industry COLLATE NOCASE",
+                 "location": "c.location COLLATE NOCASE", "contacts": "contact_count",
+                 "source": "c.source", "created_at": "c.created_at"}
+
+
 @app.get("/api/companies")
-async def get_companies():
-    """All companies with contact counts."""
-    rows = await query_db("""
+async def get_companies(q: str = "", page: int = 1, sort: str = "created_at", dir: str = "desc"):
+    """One page of companies with contact counts, searchable by name, site,
+    industry, place or phone, sorted by any column the table shows."""
+    where, params = "", ()
+    q = q.strip()[:100]
+    if q:
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where = "WHERE " + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in (
+            "c.name", "c.domain", "c.industry", "c.location", "c.phone"))
+        params = (like,) * 5
+    counted = await query_db(f"SELECT COUNT(*) AS n FROM companies c {where}", params)
+    total = counted[0]["n"] if counted else 0   # no database yet
+    order = _COMPANY_SORT.get(sort, "c.created_at") + (" ASC" if dir == "asc" else " DESC")
+    page = max(1, page)
+    rows = await query_db(f"""
         SELECT c.*,
             (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id) as contact_count
-        FROM companies c ORDER BY c.created_at DESC LIMIT 200
-    """)
-    return rows
+        FROM companies c {where} ORDER BY {order}, c.id LIMIT ? OFFSET ?
+    """, params + (COMPANIES_PAGE, (page - 1) * COMPANIES_PAGE))
+    return {"rows": rows, "total": total, "page": page, "per_page": COMPANIES_PAGE}
+
+
+@app.patch("/api/companies/{company_id}")
+async def edit_company(company_id: str, request: Request):
+    """Fix what a listing got wrong: name, industry, place, phone, website."""
+    from harvey.state import StateManager
+    data = await _json_body(request)
+    fields = {}
+    for key in StateManager.COMPANY_EDITABLE:
+        if key in data:
+            value = data[key]
+            if not isinstance(value, str) or len(value) > 300:
+                return _refuse(f"{key} must be text (up to 300 characters).")
+            fields[key] = " ".join(value.split())
+    if "name" in fields and not fields["name"]:
+        return _refuse("A company needs a name.")
+    if fields.get("website") and urlparse(fields["website"]).scheme not in ("http", "https"):
+        return _refuse("The website must start with http:// or https://.")
+    if not fields:
+        return _refuse("Nothing to change.")
+    if not await _state().update_company(company_id, **fields):
+        return JSONResponse({"success": False, "message": "No such company."}, status_code=404)
+    return {"success": True}
+
+
+@app.delete("/api/companies/{company_id}")
+async def delete_company(company_id: str):
+    """Delete a company nobody has talked to yet; discovery won't add it back."""
+    refused = await _state().remove_company(company_id)
+    if refused:
+        return _refuse(refused)
+    return {"success": True}
 
 
 # A Google Maps link the "Add a company" box accepts. Short links are resolved
@@ -721,6 +772,7 @@ async def companies_add(request: Request):
     biz.domain = normalize_domain(biz.website)
     biz.has_website = bool(biz.website)
     state = _state()
+    await state.unremove_company(biz.domain, biz.external_id)   # deleted before, added back on purpose
     company_id, is_new = await _upsert(state, biz, DiscoveryQuery(term=biz.category), source="manual")
     if is_new:
         await state.add_observations(
