@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Search, X } from 'lucide-react'
 import { Card, Subhead } from '@/components/ui/card'
+import { useNav } from '@/app/nav'
+import { cn } from '@/lib/utils'
 import { StatusBadge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/field'
@@ -75,28 +77,40 @@ function Detail({ r, onClose }: { r: OutboxItem; onClose: () => void }) {
   )
 }
 
-function Table({ title, group, cols, onOpen }: { title: string; group: Group; cols: Col[]; onOpen: (r: OutboxItem) => void }) {
+function SearchBox({ value, onChange, label }: { value: string; onChange: (v: string) => void; label: string }) {
+  return (
+    <div className="relative mb-2 w-72">
+      <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-text-3" aria-hidden />
+      <Input type="search" aria-label={'Search ' + label} placeholder="Search number, company, text, reason" className="w-full pl-8"
+        value={value} onChange={e => onChange(e.target.value)} />
+    </div>
+  )
+}
+
+function useSearch() {
   const [typed, setTyped] = useState('')
   const [q, setQ] = useState('')
-  const [page, setPage] = useState(1)
   useEffect(() => {   // search as they type, without a request per key
-    const t = setTimeout(() => { setQ(typed.trim()); setPage(1) }, 300)
+    const t = setTimeout(() => setQ(typed.trim()), 300)
     return () => clearTimeout(t)
   }, [typed])
+  return { typed, setTyped, q }
+}
+
+function Table({ title, group, cols, onOpen }: { title: string; group: Group; cols: Col[]; onOpen: (r: OutboxItem) => void }) {
+  const { typed, setTyped, q } = useSearch()
+  const [page, setPage] = useState(1)
+  useEffect(() => setPage(1), [q])
   const { data } = useApi<Page>(`/api/outbox/list?group=${group}&q=${encodeURIComponent(q)}&page=${page}`, { interval: 15000 })
   const total = data?.total ?? 0
   const per = data?.per_page || 25
   const pages = Math.max(1, Math.ceil(total / per))
-  if (!data || (!total && !q)) return null
+  if (!data) return null
+  if (!total && !q) return <p className="py-6 text-center text-[13px] text-text-2">Nothing here.</p>
   const rows = data.rows || []
   return (
     <>
-      <Subhead hint={total}>{title}</Subhead>
-      <div className="relative mb-2 w-72">
-        <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-text-3" aria-hidden />
-        <Input type="search" aria-label={'Search ' + title} placeholder="Search number, company, text, reason" className="w-full pl-8"
-          value={typed} onChange={e => setTyped(e.target.value)} />
-      </div>
+      <SearchBox value={typed} onChange={setTyped} label={title} />
       <Card flush className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-left text-[13px]">
           <thead>
@@ -128,28 +142,87 @@ function Table({ title, group, cols, onOpen }: { title: string; group: Group; co
   )
 }
 
-export function OutboxTables() {
-  const [open, setOpen] = useState<OutboxItem | null>(null)
+interface FollowUp {
+  conversation_id: string; follow_up_at: string; follow_ups: number
+  company?: string | null; phone?: string | null; last: { sender: string; content: string }
+}
+
+// Planned, not written: Harvey writes each one from the chat when it comes due.
+function FollowUps() {
+  const { goTab } = useNav()
+  const { typed, setTyped, q } = useSearch()
+  const { data } = useApi<{ rows: FollowUp[]; total: number }>(`/api/outbox/follow-ups?q=${encodeURIComponent(q)}`, { interval: 15000 })
+  if (!data) return null
+  if (!data.total && !q) {
+    return <p className="py-6 text-center text-[13px] text-text-2">No follow-ups planned. When a lead says they'll get back to you, Harvey plans one here.</p>
+  }
+  const open = (r: FollowUp) => goTab('conversations', { conversation: r.conversation_id })
   return (
     <>
-      <Table title="Approved & scheduled" group="approved" onOpen={setOpen} cols={[
+      <SearchBox value={typed} onChange={setTyped} label="follow-ups" />
+      <p className="mb-2 text-[12px] text-text-3">Written from the conversation when it comes due, so it takes in anything said until then. Their reply cancels it.</p>
+      <Card flush className="overflow-x-auto">
+        <table className="w-full whitespace-nowrap text-left text-[13px]">
+          <thead>
+            <tr className="border-b border-line text-[12px] text-text-3">
+              {['To', 'Message', 'Last in the chat', 'Goes out'].map(h => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {data.rows.map(r => (
+              <tr key={r.conversation_id} tabIndex={0} title="Open the conversation" className="cursor-pointer border-b border-line last:border-0 hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-none"
+                onClick={() => open(r)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(r) } }}>
+                <td className="max-w-[320px] truncate px-3 py-2">{r.company ? `${r.company} · ${r.phone}` : r.phone}</td>
+                <td className="px-3 py-2">{r.follow_ups ? 'Last follow-up' : 'Follow-up'}</td>
+                <td className="max-w-[320px] truncate px-3 py-2 text-text-2">{r.last.sender === 'prospect' ? '' : 'You: '}{r.last.content}</td>
+                <td className="px-3 py-2 text-text-2">{formatDate(r.follow_up_at)}</td>
+              </tr>
+            ))}
+            {!data.rows.length && <tr><td colSpan={4} className="px-3 py-4 text-center text-text-2">Nothing matches that search.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+    </>
+  )
+}
+
+type TabKey = 'approved' | 'follow_ups' | 'sent' | 'failed'
+const TABS: [TabKey, string][] = [['approved', 'Scheduled'], ['follow_ups', 'Follow-ups'], ['sent', 'Recently sent'], ['failed', "Didn't send"]]
+
+export function OutboxTables() {
+  const [open, setOpen] = useState<OutboxItem | null>(null)
+  const [tab, setTab] = useState<TabKey>('approved')
+  const { data: counts } = useApi<Record<TabKey, number>>('/api/outbox/counts', { interval: 15000 })
+  return (
+    <>
+      <Subhead>Queue and history</Subhead>
+      <div role="tablist" aria-label="Outbox" className="mb-3 flex w-fit flex-wrap gap-1 rounded-md bg-surface-2 p-1 text-[13px]">
+        {TABS.map(([key, label]) => (
+          <button key={key} type="button" role="tab" aria-selected={tab === key} onClick={() => setTab(key)}
+            className={cn('rounded-sm px-3 py-1', tab === key ? 'bg-surface font-medium shadow-sm' : 'text-text-2 hover:text-text')}>
+            {label} <span className="tabular-nums text-text-3">{counts?.[key] ?? ''}</span>
+          </button>
+        ))}
+      </div>
+      {tab === 'approved' && <Table title="scheduled" group="approved" onOpen={setOpen} cols={[
         { head: 'To', cell: who },
         { head: 'Message', cell: what },
         { head: 'Text', muted: true, cell: r => r.body },
         { head: 'Sends', muted: true, cell: r => r.status === 'sending' ? <StatusBadge status={r.status} /> : sends(r) },
-      ]} />
-      <Table title="Recently sent" group="sent" onOpen={setOpen} cols={[
+      ]} />}
+      {tab === 'follow_ups' && <FollowUps />}
+      {tab === 'sent' && <Table title="sent" group="sent" onOpen={setOpen} cols={[
         { head: 'To', cell: who },
         { head: 'Message', cell: what },
         { head: 'Text', muted: true, cell: r => r.body },
         { head: 'Sent', muted: true, cell: r => formatDate(r.sent_at) },
-      ]} />
-      <Table title="Didn't send" group="failed" onOpen={setOpen} cols={[
+      ]} />}
+      {tab === 'failed' && <Table title="didn't send" group="failed" onOpen={setOpen} cols={[
         { head: 'To', cell: who },
         { head: 'Status', cell: r => <StatusBadge status={r.status} /> },
         { head: 'Reason', muted: true, cell: r => reason(r.error) },
         { head: 'Updated', muted: true, cell: r => formatDate(r.updated_at) },
-      ]} />
+      ]} />}
       {open && <Detail r={open} onClose={() => setOpen(null)} />}
     </>
   )

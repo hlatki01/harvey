@@ -1496,6 +1496,46 @@ async def outbox_list(group: str = "approved", q: str = "", page: int = 1):
     return {"rows": rows, "total": total, "page": page, "per_page": OUTBOX_PAGE}
 
 
+_FOLLOW_UPS = ("FROM conversations c LEFT JOIN prospects p ON p.id = c.prospect_id "
+               "WHERE c.status = 'open' AND c.follow_up_at != ''")
+
+
+@app.get("/api/outbox/follow-ups")
+async def outbox_follow_ups(q: str = ""):
+    """Follow-ups Harvey planned for leads who said they'd get back: no
+    message yet (it is written when due), so they live on the conversation."""
+    where, params = _FOLLOW_UPS, ()
+    q = q.strip()[:100]
+    if q:
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where += " AND (p.company LIKE ? ESCAPE '\\' OR p.phone LIKE ? ESCAPE '\\')"
+        params = (like, like)
+    rows = await query_db(
+        "SELECT c.id AS conversation_id, c.follow_up_at, c.follow_ups, c.thread_json, "
+        f"p.company, p.phone {where} ORDER BY c.follow_up_at LIMIT 200", params)
+    for r in rows:
+        try:
+            thread = json.loads(r.pop("thread_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            thread = []
+        last = thread[-1] if thread else {}
+        r["last"] = {"sender": last.get("sender", ""), "content": str(last.get("content", ""))[:200]}
+    return {"rows": rows, "total": len(rows)}
+
+
+@app.get("/api/outbox/counts")
+async def outbox_counts():
+    """How many rows each Outbox tab holds."""
+    counts = {g: 0 for g in _OUTBOX_GROUPS}
+    for r in await query_db("SELECT status, COUNT(*) AS n FROM outbox GROUP BY status"):
+        for g, (statuses, _) in _OUTBOX_GROUPS.items():
+            if r["status"] in statuses:
+                counts[g] += r["n"]
+    found = await query_db(f"SELECT COUNT(*) AS n {_FOLLOW_UPS}")
+    counts["follow_ups"] = found[0]["n"] if found else 0
+    return counts
+
+
 def _add_sends_from(rows: list[dict], now: datetime | None = None) -> list[dict]:
     """Mark rows business hours hold back with `sends_from`: when the window
     next opens after max(send_at, now), as naive UTC like send_at. The daily

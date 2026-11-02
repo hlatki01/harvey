@@ -232,3 +232,13 @@ def test_outbox_list_pages_and_searches_with_the_company(client):
     assert client.get("/api/outbox/list?group=failed&q=100%25").json()["total"] == 0   # % is literal
     assert client.get("/api/outbox/list?group=sent").json()["total"] == 0
     assert client.get("/api/outbox/list?group=nope").status_code == 400
+
+
+def test_outbox_lists_planned_follow_ups_and_counts_every_tab(client):
+    _wa_chat(client.db_path, "prospect", status="open")
+    _sql(client.db_path, "UPDATE conversations SET follow_up_at='2026-11-04T12:00:00' WHERE id='cw'")
+    r = client.get("/api/outbox/follow-ups").json()
+    assert r["total"] == 1 and r["rows"][0]["conversation_id"] == "cw"
+    assert r["rows"][0]["company"] == "Oficina X" and r["rows"][0]["last"]["content"] == "Pode ser"
+    assert client.get("/api/outbox/follow-ups", params={"q": "nada"}).json()["total"] == 0
+    assert client.get("/api/outbox/counts").json() == {"approved": 1, "sent": 0, "failed": 0, "follow_ups": 1}
