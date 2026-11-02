@@ -8,6 +8,7 @@ without sending the same thing twice.
 
 import json
 import logging
+import re
 import time
 from datetime import date
 
@@ -133,6 +134,53 @@ async def push_alerts(state, config, client=None) -> None:
             detail += conversation_link(config, target)
         elif key == "approvals":
             event, push_key = "approvals", f"approvals:{window}"
+            title, detail = await approvals_preview(state)
         else:
             event, push_key = "system", f"{key}:{date.today().isoformat()}"
         await push(state, config, event, push_key, f"Harvey: {title}. {detail}", client)
+
+
+PREVIEWS = 5
+CODE_LEN = 6   # of the 12-hex outbox id; unique enough among what's pending
+_COMMAND = re.compile(r"^\s*(ok|sim|yes|aprovar|approve|no|n[aã]o|rejeitar|reject)\s+(\w+)\s*$", re.I)
+
+
+async def approvals_preview(state) -> tuple[str, str]:
+    """(title, detail) of the approvals push: the first few messages with a
+    code the owner answers with, so approving needs no dashboard."""
+    pending = await state.get_outbox(status="pending_review", limit=500)
+    n = len(pending)
+    lines = []
+    for item in pending[:PREVIEWS]:
+        body = " ".join((item.get("body") or "").split())
+        lines.append(f"*{item['id'][:CODE_LEN]}* → {item.get('to_email') or '?'}\n{body[:200]}")
+    more = f"\n\n(+{n - PREVIEWS} more on the dashboard)" if n > PREVIEWS else ""
+    return (f"{n} message{'s' if n != 1 else ''} waiting for approval",
+            "Reply *ok <code>* to send, *no <code>* to reject, *ok all* for everything.\n\n"
+            + "\n\n".join(lines) + more)
+
+
+async def owner_command(state, text: str) -> str | None:
+    """The owner answering an approvals push ("ok 1a2b3c", "no 1a2b3c",
+    "ok all"). Returns the confirmation to send back, or None when the
+    text isn't a command (just a chat, left alone)."""
+    m = _COMMAND.match(text or "")
+    if not m:
+        return None
+    approve = m.group(1).lower() in ("ok", "sim", "yes", "aprovar", "approve")
+    code = m.group(2).lower()
+    if code in ("all", "todos", "tudo"):
+        if not approve:
+            return None   # rejecting everything from a chat is too easy to fat-finger
+        return f"Harvey: approved {await state.approve_outbox()} message(s)."
+    matches = [i for i in await state.get_outbox(status="pending_review", limit=500)
+               if i["id"].startswith(code)]
+    if len(matches) != 1:
+        return f"Harvey: no single pending message with code {code}."
+    item_id = matches[0]["id"]
+    if approve:
+        ok = await state.approve_outbox(item_id)
+    else:
+        ok = await state.reject_outbox_item(item_id)
+    verb = "approved" if approve else "rejected"
+    return f"Harvey: {code} {verb}." if ok else f"Harvey: {code} was already handled."

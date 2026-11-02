@@ -112,8 +112,28 @@ async def test_approvals_push_at_most_once_per_window(state):
     config = _notifying(approvals_every_minutes=60)
     await notify.push_alerts(state, config, client)
     await notify.push_alerts(state, config, client)
-    assert [t for _, t in client.sent] == [
-        "Harvey: 1 message waiting for approval. Nothing goes out until you approve it."]
+    [text] = [t for _, t in client.sent]
+    assert text.startswith("Harvey: 1 message waiting for approval.") and "a@x.com" in text
+
+
+@pytest.mark.asyncio
+async def test_the_owner_approves_and_rejects_from_whatsapp(state):
+    a = await state.add_outbox_item(prospect_id="p1", to_email="a@x.com", subject="s", body="hi A",
+                                    send_at="2020-01-01T00:00:00", status="pending_review")
+    b = await state.add_outbox_item(prospect_id="p2", to_email="b@x.com", subject="s", body="hi B",
+                                    send_at="2020-01-01T00:00:00", status="pending_review")
+    client = FakeEvolution()
+    client.inbound = [WhatsAppInbound("O1", OWNER, f"ok {a[:6]}"),
+                      WhatsAppInbound("O2", OWNER, f"não {b[:6]}"),
+                      WhatsAppInbound("O3", OWNER, "no all")]
+    handler = _handler(state, client, StubBrain())
+    handler.config = _notifying()
+    await handler.run_whatsapp()
+    await handler.run_whatsapp()     # processed once only
+
+    assert (await state.get_outbox_item(a))["status"] == "approved"
+    assert (await state.get_outbox_item(b))["status"] == "rejected"
+    assert [t for _, t in client.sent] == [f"Harvey: {a[:6]} approved.", f"Harvey: {b[:6]} rejected."]
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ import html
 import json
 import logging
 import re
+import time
 
 import pytz
 from datetime import date, datetime, timedelta, timezone
@@ -887,7 +888,15 @@ class Handler:
         for msg in inbound:
             dedup_key = f"wa:{msg.provider_id}"
             if notify.is_owner(self.config, msg.phone):
-                continue   # the owner answering a push is not a lead
+                # The owner answering a push is not a lead; it may be an approval.
+                # Old messages are skipped so a stale "ok all" never fires.
+                fresh = not msg.date.isdigit() or int(msg.date) > time.time() - 3600
+                if fresh and not await self.state.is_reply_processed(dedup_key):
+                    await self.state.mark_reply_processed(dedup_key)
+                    answer = await notify.owner_command(self.state, msg.body)
+                    if answer:
+                        await self.whatsapp.send_text(msg.phone, answer)
+                continue
             if await self.state.is_reply_processed(dedup_key):
                 continue
             consumed = True
