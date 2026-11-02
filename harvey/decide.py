@@ -18,6 +18,7 @@ in the right URL, because a model that types URLs invents them.
 
 import logging
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from harvey.gate import whatsapp_check
 
@@ -39,6 +40,9 @@ HANDOFF_WORDS = (
 )
 # After this many answers from the assistant, a person takes over.
 MAX_ASSISTANT_TURNS = 6
+# A reply this similar to one of Theo's last messages says the same thing again
+# (a price restated reads ~0.67; different answers stay under ~0.35).
+REPEAT_SIMILARITY = 0.6
 
 
 @dataclass
@@ -100,7 +104,7 @@ def _handoff(decision: Decision | None, why: str) -> Decision:
 
 def apply_policy(decision: Decision | None, *, prospect, reply_text: str, demo, demo_sent: bool,
                  assistant_turns: int, allowed_prices, allowed_links, flat,
-                 slots_text: str = "") -> Decision:
+                 slots_text: str = "", recent=()) -> Decision:
     """Check a proposed decision against the rules; return what Harvey does."""
     if decision is None:
         return _handoff(None, "the model gave no usable decision")
@@ -132,6 +136,13 @@ def apply_policy(decision: Decision | None, *, prospect, reply_text: str, demo, 
     if not reply:
         return _handoff(decision, "empty reply")
     decision.reply = reply
+    if decision.action != "handoff" and any(
+            SequenceMatcher(None, flat(reply), flat(r)).ratio() >= REPEAT_SIMILARITY for r in recent):
+        # They asked again for what was just said (a quote right after the
+        # price): saying it twice reads like a bot; a person carries on.
+        handed = _handoff(decision, "repeats what was just said")
+        handed.reply = HANDOFF_REPLY
+        return handed
 
     gate = whatsapp_check(prospect.phone, reply, prospect, kind="reply",
                           allowed_prices=allowed_prices, allowed_links=allowed_links)

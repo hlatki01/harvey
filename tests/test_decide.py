@@ -87,3 +87,27 @@ def test_an_automatic_message_is_never_answered_and_ambiguity_asks_for_a_review(
     assert needs_review(parse_decision({"action": "answer", "reply": "x", "confidence": "medium"}))
     assert needs_review(parse_decision({"action": "answer", "reply": "x", "confidence": "high", "sender": "unclear"}))
     assert not needs_review(parse_decision({"action": "answer", "reply": "x", "confidence": "high"}))
+
+
+PRICE = ("O investimento é de R$ 1.500 no Pix ou no cartão em 1x, com parcelamento em até 10x (com acréscimos). "
+         "Já estão inclusos o domínio .com.br e a hospedagem pelo primeiro ano; a partir do segundo ano, a renovação "
+         "é de R$ 297 por ano. Quer que eu te explique como funciona o passo a passo do projeto?")
+
+
+def test_saying_the_price_again_hands_off_instead():
+    # A real chat: "pode passar o orçamento" 5 seconds after the price went out.
+    again = Decision("answer", "O investimento da landing page é de R$ 1.500, no Pix ou no cartão em 1x, com "
+                     "parcelamento em até 10x com acréscimos. O domínio .com.br e a hospedagem do primeiro ano já "
+                     "estão inclusos; a partir do segundo ano, a renovação é de R$ 297 por ano. Quer que eu "
+                     "encaminhe para a nossa equipe seguir com o projeto?")
+    d = apply_policy(again, prospect=_p(), reply_text="pode passar o orçamento", demo=DEMO, demo_sent=False,
+                     assistant_turns=3, allowed_prices=["1.500", "297"], allowed_links=[DEMO.url], flat=_flat,
+                     recent=["Que bom que gostou! Quer que eu te passe o investimento?", PRICE])
+    assert d.action == "handoff" and d.overridden == "repeats what was just said" and "?" not in d.reply
+
+
+def test_a_different_answer_is_not_a_repeat():
+    d = apply_policy(Decision("answer", "A entrega fica entre 10 e 15 dias."), prospect=_p(), reply_text="e o prazo?",
+                     demo=DEMO, demo_sent=False, assistant_turns=3, allowed_prices=["1.500", "297"],
+                     allowed_links=[DEMO.url], flat=_flat, recent=[PRICE])
+    assert d.action == "answer" and not d.overridden

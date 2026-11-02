@@ -86,7 +86,7 @@ Choose ONE action for the next message:
 - answer: the knowledge base covers what they asked
 - qualify: ask ONE question to learn what their business needs (only if you do not know yet)
 - send_demo: show the example site of their kind of business (only when one is available and not yet sent); write {DEMO_TOKEN} where the link goes, never a URL yourself
-- handoff: a person must take over: they want to hire, start, meet or talk to someone; or the knowledge base does not cover the question; or it needs a decision. The reply is a statement, never a question, saying "nossa equipe" (our team) will talk to them right here in this chat; never name a person
+- handoff: a person must take over: they want to hire, start, meet or talk to someone; or the knowledge base does not cover the question; or it needs a decision. The reply is a statement, never a question, and never names a person. When they said they will get back to you (taking it to the owner, a partner, thinking it over), acknowledge that: you will wait for their answer and they can write here with any question; do not promise that someone will contact them. Otherwise say "nossa equipe" (our team) will talk to them right here in this chat
 - wait: nothing needs an answer (a thanks, an "ok", an emoji)
 
 Rules for the reply:
@@ -94,6 +94,7 @@ Rules for the reply:
 - Answer ONLY from the knowledge base; never invent a service, price, deadline, discount, feature or technology
 - State prices only exactly as the knowledge base gives them
 - Answer what they asked first, then at most one question
+- Never repeat what you already said in this conversation. If they ask again for what your last message covered (an "orçamento" right after you gave the price), do not restate it: hand off
 {NO_TIMES_RULE}
 - A demo is an example, never something built for a real client
 - If they ask whether you are a person or a bot, say you are a virtual assistant
@@ -1233,7 +1234,7 @@ Example site available: {demo_line}
             decision, prospect=prospect, reply_text=reply_text, demo=demo,
             demo_sent=demo_sent, assistant_turns=len(said),
             allowed_prices=cfg.allowed_prices, allowed_links=[d.url for d in cfg.demos],
-            flat=_flat, slots_text=slots_text)
+            flat=_flat, slots_text=slots_text, recent=said[-3:])
 
     async def _generate_response(
         self, intent: str, reply_text: str, prospect, convo: Conversation
