@@ -2364,6 +2364,31 @@ async def set_conversation_status(convo_id: str, request: Request):
     return {"success": True, "status": status, "follow_up_at": result.get("follow_up_at"), **result}
 
 
+@app.post("/api/conversations/{convo_id}/follow-up/preview")
+async def preview_conversation_follow_up(convo_id: str):
+    """What the planned follow-up would say if it went out now. Nothing is
+    stored: the real one is written from the chat when it comes due."""
+    from harvey.agents.handler import Handler
+    from harvey.brain import Brain
+    from harvey.config import load_config, load_env
+    state = _state()
+    convo = await state.get_conversation(convo_id)
+    if not convo or not convo.follow_up_at:
+        return _refuse("No follow-up is planned for this conversation.")
+    prospect = await state.get_prospect(convo.prospect_id) if convo.prospect_id else None
+    if not prospect or not prospect.phone:
+        return _refuse("This conversation has no WhatsApp number.")
+    config = load_config()
+    try:
+        text = await Handler(Brain(state, config.brain), state, config, load_env())._write_follow_up(prospect, convo)
+    except Exception as e:
+        logger.warning(f"Follow-up preview failed: {e}")
+        text = ""
+    if not text:
+        return _refuse("Harvey couldn't write a preview right now. Try again in a moment.", 502)
+    return {"success": True, "text": text}
+
+
 @app.post("/api/conversations/{convo_id}/follow-up")
 async def set_conversation_follow_up(convo_id: str, request: Request):
     """The follow-up Harvey planned: {"action": "cancel"} drops it, "now"

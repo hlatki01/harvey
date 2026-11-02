@@ -99,6 +99,17 @@ function Actions({ c, onStatus, onFollowUp, busy }: {
   c: Convo; onStatus: (s: 'open' | 'closed') => void; onFollowUp: (a: 'now' | 'cancel') => void; busy: string
 }) {
   const wrap = 'mt-4 flex flex-none flex-wrap items-center gap-2 border-t border-line pt-3'
+  const toast = useToast()
+  const [preview, setPreview] = useState('')
+  useEffect(() => setPreview(''), [c.id, c.follow_up_at])
+  async function showPreview() {
+    if (preview && preview !== 'loading') { setPreview(''); return }
+    setPreview('loading')
+    const data = await api<{ success?: boolean; text?: string; message?: string }>(
+      '/api/conversations/' + encodeURIComponent(c.id) + '/follow-up/preview', { method: 'POST', headers: JSON_HEADERS, body: '{}' })
+    if (data && data.success && data.text) setPreview(data.text)
+    else { setPreview(''); toast(failMsg(data, 'Could not write a preview.'), 'error') }
+  }
   if (c.status === 'needs_human') {
     return (
       <div className={wrap}>
@@ -116,12 +127,23 @@ function Actions({ c, onStatus, onFollowUp, busy }: {
       <div className={wrap}>
         {c.follow_up_at && (
           <>
-            <span className="mr-auto inline-flex items-center gap-1.5 text-[12px] text-text-2">
+            <button type="button" onClick={showPreview} aria-expanded={!!preview} title="See what it would say"
+              className="mr-auto inline-flex items-center gap-1.5 text-left text-[12px] text-text-2 hover:text-text hover:underline">
               <Clock className="size-3.5" aria-hidden />
               Next step: {c.follow_ups ? 'last follow-up' : 'follow-up'} {formatDate(c.follow_up_at)}, if they stay quiet
-            </span>
+            </button>
             <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => onFollowUp('now')}>Send now</Button>
             <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => onFollowUp('cancel')}>Cancel follow-up</Button>
+            {preview && (
+              <div className="basis-full rounded-md bg-surface-2 p-3 text-[13px]">
+                {preview === 'loading' ? <span className="inline-flex items-center gap-2 text-text-2"><Spin />Harvey is writing a preview…</span> : (
+                  <>
+                    <div className="whitespace-pre-wrap break-words leading-relaxed">{preview}</div>
+                    <div className="mt-1.5 text-[11px] text-text-3">A preview: the real message is written from the chat when it goes out, so it may differ.</div>
+                  </>
+                )}
+              </div>
+            )}
           </>
         )}
         <Button size="sm" variant="ghost" className={c.follow_up_at ? '' : 'ml-auto'} disabled={!!busy} onClick={() => onStatus('closed')}>Close conversation</Button>

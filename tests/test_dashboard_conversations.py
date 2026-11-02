@@ -242,3 +242,18 @@ def test_outbox_lists_planned_follow_ups_and_counts_every_tab(client):
     assert r["rows"][0]["company"] == "Oficina X" and r["rows"][0]["last"]["content"] == "Pode ser"
     assert client.get("/api/outbox/follow-ups", params={"q": "nada"}).json()["total"] == 0
     assert client.get("/api/outbox/counts").json() == {"approved": 1, "sent": 0, "failed": 0, "follow_ups": 1}
+
+
+def test_preview_writes_the_follow_up_without_storing_it(client, monkeypatch):
+    _wa_chat(client.db_path, "prospect", status="open")
+    _sql(client.db_path, "UPDATE prospects SET phone='5511999990000' WHERE id='w1'")
+    assert client.post("/api/conversations/cw/follow-up/preview").status_code == 409   # nothing planned
+    _sql(client.db_path, "UPDATE conversations SET follow_up_at='2026-11-04T12:00:00' WHERE id='cw'")
+
+    async def think(self, prompt, **kw):
+        assert "Cliente: Pode ser" in prompt
+        return "Oi! Conseguiu ver com o proprietário?"
+    monkeypatch.setattr("harvey.brain.Brain.think", think)
+    r = client.post("/api/conversations/cw/follow-up/preview").json()
+    assert r == {"success": True, "text": "Oi! Conseguiu ver com o proprietário?"}
+    assert [row[0] for row in _outbox(client.db_path)] == ["old"]
