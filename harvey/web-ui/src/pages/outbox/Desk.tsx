@@ -86,7 +86,7 @@ export function Pane({ cur, index, total, footer, edit, busy, onAct, onEdit, onC
       <div className="flex flex-wrap items-center gap-2 text-[13px] text-text-2 [overflow-wrap:anywhere]">
         <span>To <b className="font-medium text-text">{cur.to_email}</b></span>
         <span className="rounded-xs bg-surface-2 px-1.5 text-[11px]">{cur.kind === 'reply' ? 'Reply' : 'Email ' + cur.step}</span>
-        <span className="text-text-3">sends {formatDate(cur.send_at)}</span>
+        <span className="text-text-3">{cur.sends_from ? `sends from ${formatDate(cur.sends_from)}` : `sends ${formatDate(cur.send_at)}`}</span>
       </div>
       <Context ctx={cur.context} />
       {edit ? (

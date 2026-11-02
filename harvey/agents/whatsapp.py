@@ -31,7 +31,7 @@ from harvey.agents.sender import follow_up_order
 from harvey.agents.writer import Writer
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import HarveyConfig, closed_until
-from harvey.decide import find_demo
+from harvey.decide import DEMO_TOKEN, find_demo
 from harvey.site_probe import find_own_site
 from harvey.gate import chat_brand, whatsapp_check
 from harvey.integrations.evolution import EvolutionClient
@@ -209,7 +209,8 @@ class WhatsAppSender:
         approval whatever the config says."""
         prospect = await self._record_prospect(company, phone, True, "new")
         body = await self._draft(company, prospect)
-        gate = whatsapp_check(phone, body, prospect=prospect, opt_out_line=self.cfg.opt_out_line)
+        gate = whatsapp_check(phone, body, prospect=prospect, opt_out_line=self.cfg.opt_out_line,
+                              allowed_links=[d.url for d in self.cfg.demos])
         if not body or not gate:
             logger.warning(f"WhatsApp: draft for {company.name} rejected: "
                            f"{gate.reasons if body else 'no draft'}")
@@ -232,7 +233,8 @@ class WhatsAppSender:
         persona, product = self.config.persona, self.config.product
         demo = find_demo(company.industry, self.cfg.demos)
         demo_rule = (f"\n- We already have a ready example site for a {demo.label} business: say so in a few words "
-                     "(no link, no address); the link comes later if they want it." if demo else "")
+                     f"and write {DEMO_TOKEN} where its link goes (never a URL yourself); it is the only link allowed."
+                     if demo else "")
         prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}. Tone: {persona.tone}.
 You sell: {product.name} - {product.description}
 
@@ -245,7 +247,7 @@ Observed facts (use at most one; never invent others):
 {chr(10).join(facts) or "- none"}
 
 Rules:
-- One message, at most 45 words, plain text, no links, no markdown.
+- One message, at most 45 words, plain text, no links of your own, no markdown.
 - Say who you are in the first sentence. Mention one observed fact if there is one, otherwise ask what they do.
 - End with one easy yes/no question. Do not pitch a price or a meeting.
 - Sound like a person typing on a phone. No greeting formulas, no emojis, no sales words.
@@ -265,6 +267,10 @@ Write ONLY the message text."""
         text = text.strip().strip('"')
         if text.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,")):
             return ""
+        if demo:
+            # The link is the code's, never the model's: where it asked, else at the end.
+            text = (text.replace(DEMO_TOKEN, demo.url, 1) if DEMO_TOKEN in text
+                    else f"{text}\n{demo.url}").replace(DEMO_TOKEN, "").strip()
         return f"{text}\n\n{self.cfg.opt_out_line}".strip()
 
     # ── campaigns ────────────────────────────────────────────────────

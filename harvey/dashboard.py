@@ -1444,8 +1444,8 @@ async def get_outbox_api():
         return {
             **_compliance_view(),
             "paused": await state.get_setting("sending_paused"),
-            "pending": await _with_context(
-                await state.get_outbox(status="pending_review", limit=100)),
+            "pending": _add_sends_from(await _with_context(
+                await state.get_outbox(status="pending_review", limit=100))),
             # Mail going out right now leads the list.
             "approved": (await state.get_outbox(status="sending", limit=10)
                          + await state.get_outbox(status="approved", limit=50)),
@@ -1496,7 +1496,7 @@ async def outbox_list(group: str = "approved", q: str = "", page: int = 1):
     return {"rows": rows, "total": total, "page": page, "per_page": OUTBOX_PAGE}
 
 
-def _add_sends_from(rows: list[dict], now: datetime | None = None) -> None:
+def _add_sends_from(rows: list[dict], now: datetime | None = None) -> list[dict]:
     """Mark rows business hours hold back with `sends_from`: when the window
     next opens after max(send_at, now), as naive UTC like send_at. The daily
     caps can push a row later still; that isn't predicted here."""
@@ -1504,7 +1504,7 @@ def _add_sends_from(rows: list[dict], now: datetime | None = None) -> None:
     try:
         config = load_config(str(_resolve_config_file()))
     except Exception:
-        return  # no hours to show; the table still lists the rows
+        return rows  # no hours to show; the table still lists the rows
     now = now or datetime.now(timezone.utc)
     for r in rows:
         try:
@@ -1514,6 +1514,7 @@ def _add_sends_from(rows: list[dict], now: datetime | None = None) -> None:
         opens = closed_until(config, max(at, now))
         if opens:
             r["sends_from"] = opens.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+    return rows
 
 
 @app.post("/api/outbox/approve-all")

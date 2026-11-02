@@ -367,6 +367,19 @@ async def test_stage_drafts_one_message_with_the_opt_out_line(state):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["Oi, aqui é o Luis. Temos um exemplo pronto: {demo_url} Quer ver?",
+                                  "Oi, aqui é o Luis. Temos um exemplo pronto. Quer ver?"])
+async def test_the_opening_carries_the_demo_link_the_code_puts_in(state, text):
+    await _company(state)
+    client = FakeEvolution({"5511987654321": "5511987654321"})
+    demo = DemoConfig(label="Oficina", url="https://demo-oficina.guilhermeh.me", keywords=["oficina"])
+    await _sender(state, client, StubBrain(text=text), demos=[demo])._stage()
+    [item] = await state.get_outbox(channel="whatsapp")
+    assert item["body"].count(demo.url) == 1 and "{demo_url}" not in item["body"]
+    assert item["body"].endswith(OPT_OUT)
+
+
+@pytest.mark.asyncio
 async def test_stage_records_unreachable_numbers_and_never_retries_them(state):
     await _company(state, "Fixo", phone="(11) 4000-1111")                # landline: no lookup
     await _company(state, "Sem Zap", phone="(11) 98888-0000")            # lookup says no
