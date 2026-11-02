@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import random
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from harvey.agents.sender import follow_up_order
@@ -61,6 +62,19 @@ SIGNAL_FACTS = {
     "RUNNING_GOOGLE_ADS": "it is running Google Ads",
     "RUNNING_META_ADS": "it is running Facebook/Instagram ads",
 }
+
+
+@dataclass
+class Assessment:
+    """What WhatsAppSender.assess found: each check as {key, ok, text, warning}."""
+
+    checks: list = field(default_factory=list)
+    blocker: str = ""     # the prospect status to record when it can't be contacted
+    phone: str = ""       # the WhatsApp number to use, once every check passed
+    site: str = ""
+
+    def add(self, key: str, ok: bool, text: str, warning: bool = False):
+        self.checks.append({"key": key, "ok": ok, "text": text, "warning": warning})
 
 
 class WhatsAppSender:
@@ -138,46 +152,79 @@ class WhatsAppSender:
         prospect.id = await self.state.add_prospect(prospect)
         return prospect
 
-    async def _stage_company(self, company) -> bool:
+    async def assess(self, company, manual: bool = False) -> "Assessment":
+        """Can this business get a WhatsApp opening, and why not. The heartbeat
+        stops at the first problem (each check after it costs a request); for a
+        company added by hand a site of its own is only a warning: whoever
+        added it had a reason."""
+        a = Assessment()
         phone = normalize_phone(company.phone, self.cfg.default_country_code)
         if not phone or not looks_like_mobile(phone):
-            await self._record_prospect(company, "", False, "no_whatsapp")
-            return False
-        site = await find_own_site(company.name)
+            a.add("mobile", False, f"No mobile number listed ({company.phone or 'none'}).")
+            a.blocker = "no_whatsapp"
+            return a
+        a.add("mobile", True, f"Mobile number {phone}.")
+        site = company.domain or await find_own_site(company.name)
         if site:
-            # The listing had no site, but the business does: not who we sell to.
-            await self._record_prospect(company, "", False, "has_website")
-            await self.state.log_action(
-                action_type="site_found", agent="whatsapp",
-                details={"company": company.name, "domain": site, "stage": "staging"})
-            return False
+            a.site = site
+            a.add("site", False, f"Already has a website ({site}): not who we usually sell to.",
+                  warning=manual)
+            if not manual:
+                a.blocker = "has_website"
+                return a
+        else:
+            a.add("site", True, "No website of its own.")
         known = (await self.client.check_numbers([phone])).get(phone)
         if not known:
-            await self._record_prospect(company, "", False, "no_whatsapp")
-            return False
+            a.add("whatsapp", False, "This number has no WhatsApp.")
+            a.blocker = "no_whatsapp"
+            return a
+        a.add("whatsapp", True, "Has WhatsApp.")
         if await self.state.get_prospect_by_phone(known):
             # Two businesses list the same number: only the first is contacted.
-            await self._record_prospect(company, "", False, "duplicate")
-            return False
-        prospect = await self._record_prospect(company, known, True, "new")
+            a.add("duplicate", False, "This number is already a lead in Harvey.")
+            a.blocker = "duplicate"
+            return a
+        demo = find_demo(company.industry, self.cfg.demos)
+        a.add("demo", bool(demo), f"Example site ready: {demo.label}." if demo
+              else "No example site for this kind of business.", warning=not demo)
+        a.phone = known
+        return a
 
+    async def _stage_company(self, company) -> bool:
+        a = await self.assess(company)
+        if a.blocker:
+            await self._record_prospect(company, "", False, a.blocker)
+            if a.site:
+                # The listing had no site, but the business does: not who we sell to.
+                await self.state.log_action(
+                    action_type="site_found", agent="whatsapp",
+                    details={"company": company.name, "domain": a.site, "stage": "staging"})
+            return False
+        return bool(await self.stage(company, a.phone))
+
+    async def stage(self, company, phone: str, review: bool = False) -> str:
+        """Write the opening for an assessed company and queue it: the outbox
+        id, or "" when no usable draft came out. `review` holds it for
+        approval whatever the config says."""
+        prospect = await self._record_prospect(company, phone, True, "new")
         body = await self._draft(company, prospect)
-        gate = whatsapp_check(known, body, prospect=prospect, opt_out_line=self.cfg.opt_out_line)
+        gate = whatsapp_check(phone, body, prospect=prospect, opt_out_line=self.cfg.opt_out_line)
         if not body or not gate:
             logger.warning(f"WhatsApp: draft for {company.name} rejected: "
                            f"{gate.reasons if body else 'no draft'}")
             await self.state.update_prospect_status(prospect.id, "write_failed")
-            return False
+            return ""
 
         item_id = await self.state.add_outbox_item(
-            prospect_id=prospect.id, to_email=known, subject=WHATSAPP_SUBJECT, body=body,
+            prospect_id=prospect.id, to_email=phone, subject=WHATSAPP_SUBJECT, body=body,
             send_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            status="pending_review" if self.cfg.require_approval else "approved",
+            status="pending_review" if review or self.cfg.require_approval else "approved",
             provider=self.client.name, channel="whatsapp",
         )
         if item_id:
             await self.state.queue_prospect_if_unsent(prospect.id)
-        return bool(item_id)
+        return item_id or ""
 
     async def _draft(self, company, prospect) -> str:
         signals = await self.state.company_signal_codes(company.id)

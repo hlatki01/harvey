@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Building2, ArrowLeft } from 'lucide-react'
+import { Building2, ArrowLeft, Plus } from 'lucide-react'
 import { useApi } from '@/lib/hooks'
 import { relTime, safeHref, sourceLabel } from '@/lib/format'
 import { Button } from '@/components/ui/button'
@@ -7,6 +7,7 @@ import { Card, SectionHead } from '@/components/ui/card'
 import { StatusBadge } from '@/components/ui/badge'
 import { EmptyState, OfflineState, Skeleton } from '@/components/ui/states'
 import { Avatar, EmailTag, TableCard, TH, TD, type Prospect } from './pipeline/shared'
+import { AddCompany } from './companies/AddCompany'
 
 interface Company {
   id: string | number; name?: string; domain?: string; website?: string; industry?: string
@@ -56,10 +57,16 @@ function Drill({ company, onBack }: { company: Company; onBack: () => void }) {
 
 export function CompaniesPage() {
   const [drill, setDrill] = useState<Company | null>(null)
+  const [adding, setAdding] = useState(false)
   // Not refreshed while drilled into one company, as before.
-  const { data } = useApi<Company[]>('/api/companies', { interval: drill ? undefined : 15000 })
+  const { data, refetch } = useApi<Company[]>('/api/companies', { interval: drill ? undefined : 15000 })
 
-  const head = <SectionHead title="Companies">Organizations Harvey has researched. Click a row to see its contacts.</SectionHead>
+  const head = <>
+    <SectionHead title="Companies">Organizations Harvey has researched. Click a row to see its contacts.</SectionHead>
+    {!drill && (adding
+      ? <AddCompany onClose={() => setAdding(false)} onAdded={() => { refetch() }} />
+      : <Button size="sm" className="mb-4" onClick={() => setAdding(true)}><Plus className="size-3.5" aria-hidden />Add a company</Button>)}
+  </>
   if (drill) return <>{head}<Drill company={drill} onBack={() => setDrill(null)} /></>
   if (data === undefined) return <>{head}<Skeleton /></>
   if (!data) return <>{head}<OfflineState /></>

@@ -1031,7 +1031,7 @@ async def run_discovery(
     return report
 
 
-async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, bool]:
+async def _upsert(state, biz: Business, query: DiscoveryQuery, source: str = "") -> tuple[str, bool]:
     """Record the business, returning (id, was_new)."""
     # Look before inserting, so "already knew this one" is a fact we report
     # rather than something inferred from an insert's return value.
@@ -1050,7 +1050,7 @@ async def _upsert(state, biz: Business, query: DiscoveryQuery) -> tuple[str, boo
         phone=biz.phone,
         industry=biz.category or query.term,
         location=biz.location or query.location,
-        source=f"discover:{biz.provider}",
+        source=source or f"discover:{biz.provider}",
         source_url=biz.source_url,
         external_id=biz.external_id,
     )

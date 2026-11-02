@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from urllib.parse import urlparse
 import signal
 import stat
 import subprocess
@@ -619,6 +620,141 @@ async def get_companies():
         FROM companies c ORDER BY c.created_at DESC LIMIT 200
     """)
     return rows
+
+
+# A Google Maps link the "Add a company" box accepts. Short links are resolved
+# by following redirects, and only ever to these hosts.
+_MAPS_HOSTS = re.compile(r"(^|\.)(google\.[a-z.]{2,8}|goo\.gl)$")
+
+
+async def _maps_query(text: str) -> tuple[str, str]:
+    """(what to search for, "lat,lng,radius_km" bias) from a name or a Maps link;
+    ("", "") when a link can't be read."""
+    from urllib.parse import parse_qs, unquote_plus
+    if not text.lower().startswith(("http://", "https://")):
+        return text, ""
+    url = text
+    import httpx
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+        for _ in range(4):
+            host = (urlparse(url).hostname or "").lower()
+            if not _MAPS_HOSTS.search(host):
+                return "", ""
+            if "goo.gl" not in host:
+                break
+            try:
+                r = await client.get(url)
+            except httpx.HTTPError:
+                return "", ""
+            url = r.headers.get("location", "")
+    parsed = urlparse(url)
+    place = re.search(r"/maps/place/([^/@]+)", parsed.path)
+    name = unquote_plus(place.group(1)) if place else (parse_qs(parsed.query).get("q") or [""])[0]
+    at = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", parsed.path)
+    return " ".join(name.split())[:200], f"{at.group(1)},{at.group(2)},2" if at else ""
+
+
+@app.post("/api/companies/lookup")
+async def companies_lookup(request: Request):
+    """Search Google Maps for one business, by name and city or a Maps link.
+    Nothing is saved: the person picks the right result first."""
+    from dataclasses import asdict
+    import httpx
+    from harvey.collectors.discover import PROVIDERS, TIMEOUT, DiscoveryQuery
+    from harvey.config import load_env
+    q = " ".join(str((await _json_body(request)).get("q") or "").split())[:500]
+    if not q:
+        return _refuse("Type a business name and city, or paste a Google Maps link.")
+    term, bias = await _maps_query(q)
+    if not term:
+        return _refuse("Couldn't read that link. Paste the business name and city instead.")
+    provider = PROVIDERS["google_places"]
+    env = load_env().model_dump()
+    if not provider.configured(env):
+        return _refuse("Searching needs GOOGLE_PLACES_API_KEY in .env.")
+    state = _state()
+    run_id = await state.start_run("discover", provider=provider.key, params={"manual": term[:100]})
+    provider.last_cost = 0.0
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            found = await provider.fetch(client, env, DiscoveryQuery(term=term, coordinate=bias, limit=5))
+    except Exception as e:
+        await state.finish_run(run_id, status="failed", cost_usd=provider.last_cost, error=str(e)[:300])
+        logger.warning("Company lookup failed: %s", e)
+        return _refuse("Google Maps didn't answer. Try again in a moment.", 502)
+    await state.finish_run(run_id, status="completed", records=len(found), cost_usd=provider.last_cost)
+    results = []
+    for biz in found:
+        known = ((biz.domain and await state.get_company_by_domain(biz.domain))
+                 or (biz.external_id and await state.get_company_by_external_id(biz.external_id)))
+        results.append({**asdict(biz), "known_id": known.id if known else ""})
+    return {"results": results}
+
+
+def _assessor(state, config, brain=None):
+    from harvey.agents.whatsapp import WhatsAppSender
+    from harvey.config import load_env
+    return WhatsAppSender(brain, state, config, load_env(), send_pacing=False)
+
+
+@app.post("/api/companies/add")
+async def companies_add(request: Request):
+    """Save a business picked from a lookup, then check whether Harvey can
+    open a WhatsApp chat with it. Nothing is sent."""
+    from harvey.collectors.discover import Business, DiscoveryQuery, _observations, _upsert, normalize_domain
+    from harvey.config import load_config
+    raw = (await _json_body(request)).get("business")
+    if not isinstance(raw, dict):
+        return _refuse("Pick a business from the search results.")
+    text = lambda k, n: " ".join(str(raw.get(k) or "").split())[:n]
+    number = lambda k: raw.get(k) if isinstance(raw.get(k), (int, float)) and not isinstance(raw.get(k), bool) else None
+    biz = Business(
+        name=text("name", 200), website=text("website", 300), phone=text("phone", 40),
+        address=text("address", 300), category=text("category", 100),
+        rating=number("rating"), review_count=number("review_count"),
+        external_id=text("external_id", 200), source_url=text("source_url", 500), provider="google_places")
+    if not biz.name or not biz.external_id.startswith("google_places:"):
+        return _refuse("Pick a business from the search results.")
+    # Shown as links later: only plain web addresses.
+    web = lambda u: u if urlparse(u).scheme in ("http", "https") else ""
+    biz.website, biz.source_url = web(biz.website), web(biz.source_url)
+    biz.domain = normalize_domain(biz.website)
+    biz.has_website = bool(biz.website)
+    state = _state()
+    company_id, is_new = await _upsert(state, biz, DiscoveryQuery(term=biz.category), source="manual")
+    if is_new:
+        await state.add_observations(
+            _observations(biz, company_id, await state.confirmed_signal_codes(), ""))
+    company = await state.get_company(company_id)
+    a = await _assessor(state, load_config()).assess(company, manual=True)
+    return {"success": True, "company_id": company_id, "new": is_new,
+            "checks": a.checks, "can_open": not a.blocker}
+
+
+@app.post("/api/companies/{company_id}/whatsapp")
+async def companies_open_whatsapp(company_id: str):
+    """Write the first WhatsApp message for a company added by hand. It waits
+    in the Outbox for approval, and goes out in business hours like any other."""
+    from harvey.brain import Brain
+    from harvey.config import load_config
+    state = _state()
+    company = await state.get_company(company_id)
+    if not company:
+        return JSONResponse({"success": False, "message": "No such company."}, status_code=404)
+    config = load_config()
+    sender = _assessor(state, config)
+    if not sender.client.is_configured():
+        return _refuse("WhatsApp (Evolution) is not configured.")   # a 503 would lock the dashboard
+    a = await sender.assess(company, manual=True)
+    if a.blocker:
+        return _refuse(next((c["text"] for c in a.checks if not c["ok"] and not c["warning"]),
+                            "Harvey can't open a chat with this business."))
+    sender.brain = Brain(state, config.brain)
+    sender.skills = sender.brain.load_skills_for_agent("whatsapp") + await state.lessons_block()
+    item_id = await sender.stage(company, a.phone, review=True)
+    if not item_id:
+        return _refuse("Harvey couldn't write a usable first message. Try again.", 502)
+    return {"success": True, "outbox_id": item_id}
 
 
 @app.get("/api/companies/{company_id}/contacts")

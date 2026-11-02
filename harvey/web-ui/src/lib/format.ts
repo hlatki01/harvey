@@ -106,7 +106,7 @@ const SOURCE_LABELS: Record<string, string> = {
   scraped_mailto: 'Published address', hunter_domain_search: 'Hunter', linkedin_search: 'LinkedIn',
   job_board: 'Job board', web_search: 'Web search', company_inbox: 'Company inbox',
   osm: 'OpenStreetMap', dataforseo_listings: 'DataForSEO', dataforseo_serp: 'DataForSEO SERP',
-  serper: 'Serper', google_places: 'Google Places',
+  serper: 'Serper', google_places: 'Google Places', manual: 'Added by hand',
 }
 export function sourceLabel(s: unknown): string {
   if (!s) return ''
