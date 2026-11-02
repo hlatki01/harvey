@@ -17,6 +17,7 @@ def client(tmp_path, monkeypatch):
     shutil.copy(PROJECT_ROOT / "harvey.yaml", cfg)
     monkeypatch.setattr(dash, "_resolve_config_file", lambda: cfg)
     monkeypatch.setattr(dash, "PID_FILE", tmp_path / "data" / "harvey.pid")
+    monkeypatch.setattr(dash, "DB_PATH", tmp_path / "data" / "harvey.db")
     dash.token_store.configure(tmp_path / "data" / "dashboard-token")
     with TestClient(dash.app, base_url="http://127.0.0.1:5555",
                     headers={"Authorization": f"Bearer {dash.token_store.get()}"}) as c:
@@ -116,3 +117,19 @@ def test_bad_categories_are_refused_and_the_file_untouched(client, demos):
     before = client.cfg.read_text(encoding="utf-8")
     r = client.post("/api/settings/demos", json={"demos": demos})
     assert r.status_code == 409 and client.cfg.read_text(encoding="utf-8") == before
+
+
+def test_cities_harvey_added_and_what_each_city_yields(client):
+    import asyncio
+    from harvey.state import StateManager
+    state = StateManager(str(dash.DB_PATH))
+    asyncio.run(state.init_db())
+    asyncio.run(state.add_discovery_city("Guarapuava, PR", "-25.39,-51.46,30", "Grande e perto."))
+    asyncio.run(state.record_query_yield("barbearia", "Guarapuava, PR", 40, 30))
+    r = client.get("/api/settings/geography").json()
+    assert r["added"][0]["name"] == "Guarapuava, PR" and r["added"][0]["reason"] == "Grande e perto."
+    y = r["yields"]["Guarapuava, PR"]
+    assert (y["searched"], y["found"], y["new"]) == (1, 40, 30)
+    assert client.delete("/api/settings/geography/added/Guarapuava, PR").json()["success"]
+    assert client.get("/api/settings/geography").json()["added"] == []
+    assert client.delete("/api/settings/geography/added/Guarapuava, PR").status_code == 404

@@ -996,6 +996,7 @@ async def run_discovery(
 
                 report.found += len(found)
                 batch = []
+                q_found = q_new = 0
                 for biz in found:
                     if is_junk(biz.domain, biz.raw_title or biz.name):
                         report.junk += 1
@@ -1008,8 +1009,10 @@ async def run_discovery(
                         continue    # deleted on the dashboard: stays deleted
 
                     company_id, is_new = await _upsert(state, biz, query)
+                    q_found += 1
                     if is_new:
                         report.new_companies += 1
+                        q_new += 1
                     else:
                         report.known_companies += 1
                     batch.extend(_observations(biz, company_id, confirmed,
@@ -1020,6 +1023,7 @@ async def run_discovery(
                 if batch:
                     report.observations += await state.add_observations(
                         batch, run_id=report.run_id)
+                await state.record_query_yield(query.term, query.location, q_found, q_new)
 
         await state.finish_run(report.run_id, status="completed",
                                records=report.new_companies + report.known_companies,

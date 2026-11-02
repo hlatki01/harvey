@@ -693,6 +693,14 @@ class AutoDiscoveryConfig(BaseModel):
     queries_per_run: int = 5     # industry x city queries each run takes, walking the whole list in turn
     min_hours_between_runs: float = 6.0
     max_spend_per_day: float = 0.0   # USD across all auto runs today; 0 = only free providers
+    # Harvey adds the next city itself when the list runs short of new ground
+    # (pipeline.expand_cities), at most this many a week.
+    expand_cities: bool = False
+    city_additions_per_week: int = 2
+    # A search whose last run brought back under this share of new
+    # businesses is skipped until recheck_after_days have passed.
+    exhausted_below: float = 0.2
+    recheck_after_days: int = 60
 
     @field_validator("queries_per_run")
     @classmethod

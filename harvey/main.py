@@ -429,7 +429,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # never grows faster than profiling clears it.
             if not unprofiled:
 
-                tasks.append(("discover", run_auto_discovery(state, config)))
+                tasks.append(("discover", run_auto_discovery(state, config, brain)))
 
             outcomes = await _run_agents(tasks)
 

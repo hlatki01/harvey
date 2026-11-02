@@ -528,6 +528,27 @@ MIGRATIONS: list[str] = [
     ALTER TABLE conversations ADD COLUMN follow_up_at TEXT NOT NULL DEFAULT '';
     ALTER TABLE conversations ADD COLUMN follow_ups INTEGER NOT NULL DEFAULT 0;
     """,
+    # ── v21: what each discovery search yields, and the cities Harvey added itself (pipeline.py) ──
+    """
+    CREATE TABLE IF NOT EXISTS discovery_yield (
+        term TEXT NOT NULL,
+        location TEXT NOT NULL,
+        runs INTEGER NOT NULL DEFAULT 0,
+        found INTEGER NOT NULL DEFAULT 0,
+        new INTEGER NOT NULL DEFAULT 0,
+        last_found INTEGER NOT NULL DEFAULT 0,
+        last_new INTEGER NOT NULL DEFAULT 0,
+        last_run_at TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (term, location)
+    );
+    CREATE TABLE IF NOT EXISTS discovery_cities (
+        name TEXT PRIMARY KEY,
+        coordinate TEXT NOT NULL DEFAULT '',
+        reason TEXT NOT NULL DEFAULT '',
+        added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        removed INTEGER NOT NULL DEFAULT 0
+    );
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -1151,6 +1172,49 @@ class StateManager:
             )
             await db.commit()
             return item_id if cursor.rowcount > 0 else None
+
+    # ── Discovery yield and the cities Harvey adds ──
+
+    async def record_query_yield(self, term: str, location: str, found: int, new: int):
+        """One discovery search ran: how many businesses came back, how many were new."""
+        async with self._connect() as db:
+            await db.execute(
+                "INSERT INTO discovery_yield (term, location, runs, found, new, last_found, last_new, last_run_at) "
+                "VALUES (?, ?, 1, ?, ?, ?, ?, ?) ON CONFLICT(term, location) DO UPDATE SET "
+                "runs = runs + 1, found = found + excluded.found, new = new + excluded.new, "
+                "last_found = excluded.last_found, last_new = excluded.last_new, last_run_at = excluded.last_run_at",
+                (term, location, found, new, found, new, _utcnow().isoformat()))
+            await db.commit()
+
+    async def query_yields(self) -> dict[tuple[str, str], dict]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM discovery_yield") as cursor:
+                return {(r["term"], r["location"]): dict(r) for r in await cursor.fetchall()}
+
+    async def discovery_cities(self, removed: bool = False) -> list[dict]:
+        """Cities Harvey added to discovery (removed=True: also the ones taken out)."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM discovery_cities" + ("" if removed else " WHERE removed = 0")
+                + " ORDER BY added_at") as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def add_discovery_city(self, name: str, coordinate: str, reason: str) -> bool:
+        async with self._connect() as db:
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO discovery_cities (name, coordinate, reason) VALUES (?, ?, ?)",
+                (name, coordinate, reason))
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def remove_discovery_city(self, name: str) -> bool:
+        """Taken out on the dashboard: never searched or proposed again."""
+        async with self._connect() as db:
+            cur = await db.execute("UPDATE discovery_cities SET removed = 1 WHERE name = ? AND removed = 0", (name,))
+            await db.commit()
+            return cur.rowcount > 0
 
     async def has_queued_outbox(self, prospect_id: str) -> bool:
         """Anything still waiting to go out to this person."""

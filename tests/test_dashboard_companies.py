@@ -76,6 +76,8 @@ def test_delete_takes_contacts_and_signals_and_discovery_does_not_bring_it_back(
     _sql(db.db_path, "UPDATE signal_codes SET status='confirmed' WHERE code='FOUND_IN_SERP'")
     report = asyncio.run(run_discovery(state, None, "google_places", [DiscoveryQuery(term="pet")], max_spend=5))
     assert report.new_companies == 1
+    [y] = asyncio.run(state.query_yields()).values()      # what the search yielded is kept
+    assert (y["term"], y["last_found"], y["last_new"]) == ("pet", 1, 1)
     assert _sql(db.db_path, "SELECT name FROM companies WHERE external_id='google_places:2'") == []
 
 

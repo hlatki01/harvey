@@ -322,3 +322,64 @@ async def test_auto_discovery_is_off_until_enabled_and_walks_the_query_list(stat
     await P.run_auto_discovery(state, config)
     assert calls[1][0] != calls[0][0]  # the cursor moved on
     assert len(calls[1]) == 2
+
+
+# ── Searches that wore out, and the cities Harvey adds ──
+
+
+@pytest.mark.asyncio
+async def test_worn_out_searches_are_skipped_and_fresh_ones_go_first(state, config, monkeypatch):
+    calls = []
+
+    async def fake_run(st, cfg, provider, queries, max_spend=1.0, dry_run=False):
+        calls.append([(q.term, q.location) for q in queries])
+        return D.DiscoveryReport(provider=provider, queries=len(queries))
+
+    monkeypatch.setattr(D, "run_discovery", fake_run)
+    config.icp.industries, config.icp.geography = ["a", "b"], ["X", "Y"]
+    config.discovery.enabled, config.discovery.provider = True, "osm"
+    config.discovery.queries_per_run, config.discovery.min_hours_between_runs = 2, 0.0001
+    config.discovery.expand_cities = False
+    await state.record_query_yield("a", "X", 50, 2)      # worn out: 4% new
+    await state.record_query_yield("a", "Y", 50, 40)     # still rich, but already run
+    await P.run_auto_discovery(state, config)
+    assert sorted(calls[0]) == [("b", "X"), ("b", "Y")]   # never run first; ("a","X") skipped
+
+
+class CityBrain:
+    def __init__(self, *cities):
+        self.cities, self.prompts = list(cities), []
+
+    async def think_json(self, prompt, **kw):
+        self.prompts.append(prompt)
+        return {"city": self.cities.pop(0), "radius_km": 30, "why": "Grande e perto de Curitiba."}
+
+
+@pytest.mark.asyncio
+async def test_harvey_adds_a_city_at_most_as_often_as_allowed(state, config, monkeypatch):
+    async def geocode(st, city, radius_km=40, client=None):
+        return "" if city == "Lugar Nenhum, XX" else f"-25.0,-50.0,{radius_km}"
+    monkeypatch.setattr(D, "geocode_city", geocode)
+    pushed = []
+
+    async def push(*a, **k):
+        pushed.append(a[4])
+    monkeypatch.setattr("harvey.notify.push", push)
+    config.icp.geography = ["Curitiba, PR"]
+    config.discovery.city_additions_per_week = 2
+
+    brain = CityBrain("Lugar Nenhum, XX", "Guarapuava, PR", "Irati, PR")
+    assert await P.expand_cities(state, config, brain) == ""            # not on the map
+    async with state._connect() as db:      # that attempt was days ago
+        await db.execute("UPDATE discovery_cities SET added_at = '2020-01-01 00:00:00'")
+        await db.commit()
+    assert await P.expand_cities(state, config, brain) == "Guarapuava, PR"
+    assert "Lugar Nenhum" in brain.prompts[1]                            # never proposed again
+    assert await P.expand_cities(state, config, brain) == ""            # spread across the week
+    assert len(brain.prompts) == 2 and pushed and "Guarapuava" in pushed[0]
+
+    queries = await P.discovery_queries(state, config)
+    assert {q.location for q in queries} == {"Curitiba, PR", "Guarapuava, PR"}
+    assert [q.coordinate for q in queries if q.location == "Guarapuava, PR"][0] == "-25.0,-50.0,30"
+    assert await state.remove_discovery_city("Guarapuava, PR")
+    assert {q.location for q in await P.discovery_queries(state, config)} == {"Curitiba, PR"}

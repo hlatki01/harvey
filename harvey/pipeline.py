@@ -16,6 +16,7 @@ not every row you hold.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("harvey.pipeline")
@@ -173,15 +174,18 @@ async def run_prospecting(
     return report
 
 
-async def run_auto_discovery(state, config) -> dict | None:
+async def run_auto_discovery(state, config, brain=None) -> dict | None:
     """One scheduled slice of discovery, or None when it isn't due.
 
-    Walks the (industry x city) list `queries_per_run` at a time, keeping its
-    place in settings so every cycle of the heartbeat can call this cheaply.
+    Takes `queries_per_run` (industry x city) searches at a time: ones never
+    run first, then the longest unsearched, skipping searches that came back
+    mostly with businesses already known (until `recheck_after_days`). When
+    there is little new ground left and `expand_cities` is on, Harvey adds the
+    next city itself (with `brain`), at most `city_additions_per_week` times.
     Spend is capped per day across runs; a paid provider with no budget is a no-op.
     """
     from datetime import datetime, timedelta, timezone
-    from harvey.collectors.discover import PROVIDERS, build_queries, run_discovery
+    from harvey.collectors.discover import PROVIDERS, run_discovery
 
     cfg = config.discovery
     if not cfg.enabled or cfg.provider not in PROVIDERS:
@@ -201,16 +205,117 @@ async def run_auto_discovery(state, config) -> dict | None:
             spent = (await cur.fetchone())[0]
 
     budget = cfg.max_spend_per_day - spent
-    all_queries = build_queries(config)
+    all_queries = await discovery_queries(state, config)
     if not all_queries or (budget <= 0 and PROVIDERS[cfg.provider].estimate(all_queries[:1]) > 0):
         return None
 
+    yields = await state.query_yields()
+    if cfg.expand_cities and brain is not None:
+        fresh = sum(1 for q in all_queries if (q.term, q.location) not in yields)
+        runs_a_day = 24 / max(cfg.min_hours_between_runs, 1)
+        if fresh < cfg.queries_per_run * runs_a_day * 3:     # under three days of new ground
+            if await expand_cities(state, config, brain, yields):
+                all_queries = await discovery_queries(state, config)
+
     start = int(await state.get_setting("discovery_auto_cursor") or 0) % len(all_queries)
-    batch = [all_queries[(start + i) % len(all_queries)]
-             for i in range(min(cfg.queries_per_run, len(all_queries)))]
+    rotated = all_queries[start:] + all_queries[:start]
+    recheck = (datetime.now(timezone.utc) - timedelta(days=cfg.recheck_after_days)).replace(tzinfo=None).isoformat()
+
+    def worn_out(y: dict) -> bool:
+        return y["last_run_at"] > recheck and (
+            not y["last_found"] or y["last_new"] / y["last_found"] < cfg.exhausted_below)
+
+    def rank(q) -> tuple:
+        y = yields.get((q.term, q.location))
+        return (0, "") if y is None else (1, y["last_run_at"])
+
+    ready = [q for q in rotated if (q.term, q.location) not in yields or not worn_out(yields[(q.term, q.location)])]
+    batch = sorted(ready, key=rank)[:cfg.queries_per_run]      # stable: the rotation breaks ties
+    if not batch:
+        logger.info("Auto discovery: every search is worn out until a recheck is due.")
+        return None
     await state.set_setting("discovery_auto_cursor", str((start + len(batch)) % len(all_queries)))
 
     report = await run_discovery(state, config, cfg.provider, batch, max_spend=max(budget, 0.0))
     logger.info("Auto discovery: %d new companies from %d queries (%s)",
                 report.new_companies, report.queries, report.stopped or "done")
     return report.as_dict()
+
+
+async def discovery_queries(state, config) -> list:
+    """The configured (industry x city) searches plus the cities Harvey added."""
+    from harvey.collectors.discover import build_queries
+    configured = {c.lower() for c in config.icp.geography}
+    extra = [c for c in await state.discovery_cities() if c["name"].lower() not in configured]
+    queries = build_queries(config, cities=list(config.icp.geography) + [c["name"] for c in extra])
+    coords = {c["name"]: c["coordinate"] for c in extra}
+    for q in queries:
+        if not q.coordinate and coords.get(q.location):
+            q.coordinate = coords[q.location]
+    return queries
+
+
+CITY_RE = re.compile(r"^[^,\n]{2,60}, [A-Z]{2}$")
+
+
+async def expand_cities(state, config, brain, yields: dict | None = None) -> str:
+    """Add the next city to discovery, if one is due this week. Returns its name, or ""."""
+    from datetime import datetime, timedelta, timezone
+    from harvey import notify
+    from harvey.collectors.discover import geocode_city
+    cfg = config.discovery
+    now = datetime.now(timezone.utc)
+    stamp = "%Y-%m-%d %H:%M:%S"
+    tried = await state.discovery_cities(removed=True)
+    week_ago = (now - timedelta(days=7)).strftime(stamp)
+    if sum(1 for c in tried if (c["added_at"] or "") >= week_ago) >= cfg.city_additions_per_week:
+        return ""
+    spacing = (now - timedelta(days=7 / max(cfg.city_additions_per_week, 1))).strftime(stamp)
+    if any((c["added_at"] or "") >= spacing for c in tried):
+        return ""      # spread across the week, not two on the same day
+
+    yields = yields if yields is not None else await state.query_yields()
+    per_city: dict[str, list[int]] = {}
+    for (_, loc), y in yields.items():
+        tally = per_city.setdefault(loc, [0, 0])
+        tally[0] += y["last_found"]
+        tally[1] += y["last_new"]
+    listed = list(config.icp.geography) + [
+        c["name"] for c in tried if not c["removed"] and c["name"] not in config.icp.geography]
+    never = [c["name"] for c in tried if c["removed"]]
+    lines = [f"- {c}: last searches found {per_city.get(c, [0, 0])[0]} businesses, "
+             f"{per_city.get(c, [0, 0])[1]} of them new" for c in listed]
+    avoid = ("Never suggest these (taken out or not found): " + ", ".join(never)) if never else ""
+    prompt = f"""Harvey finds small businesses on Google Maps to sell websites to. It searches these Brazilian cities:
+{chr(10).join(lines)}
+{avoid}
+
+Suggest the ONE next Brazilian city to add (any state): one with many small businesses
+(barbershops, salons, pet shops, garages, clinics, shops), not already listed, ideally near
+the cities above. Bigger and closer first.
+
+Return ONLY JSON: {{"city": "Name, UF", "radius_km": 10 to 50 by the city's size, "why": "one short sentence in Brazilian Portuguese"}}"""
+    raw = await brain.think_json(prompt, session_id="harvey-discovery", agent="analyst", task="expand_cities")
+    if not isinstance(raw, dict):
+        return ""
+    city = " ".join(str(raw.get("city") or "").split())
+    if not CITY_RE.match(city) or city.lower() in {c.lower() for c in listed + never}:
+        logger.warning("Auto discovery: unusable city suggestion %r", raw.get("city"))
+        return ""
+    try:
+        radius = max(10, min(50, int(raw.get("radius_km") or 25)))
+    except (TypeError, ValueError):
+        radius = 25
+    coordinate = await geocode_city(state, city, radius)
+    why = " ".join(str(raw.get("why") or "").split())[:200]
+    if not coordinate:
+        # Kept, as removed, so it is never proposed again.
+        await state.add_discovery_city(city, "", "not found on the map")
+        await state.remove_discovery_city(city)
+        return ""
+    await state.add_discovery_city(city, coordinate, why)
+    await state.log_action("city_added", "discovery", {"city": city, "coordinate": coordinate, "why": why})
+    logger.info("Auto discovery: added %s (%s)", city, why)
+    await notify.push(state, config, "system", f"city:{city}",
+                      f"Harvey: adicionei {city} à busca de empresas. {why}")
+    return city

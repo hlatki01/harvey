@@ -476,10 +476,39 @@ def _replace_config_key(lines: list[str], path: list[str], block: list[str]) -> 
 
 @app.get("/api/settings/geography")
 async def get_geography():
+    """The cities in the config, the ones Harvey added itself, and what each
+    city's searches yielded last time (found / new)."""
     from harvey.config import load_config
-    icp = load_config(str(_resolve_config_file())).icp
+    config = load_config(str(_resolve_config_file()))
+    icp = config.icp
     coords = icp.geo_coordinates or {}
-    return {"cities": [{"name": c, "coordinate": coords.get(c, "")} for c in icp.geography]}
+    state = _state()
+    await state.init_db()
+    per_city: dict[str, dict] = {}
+    for (_, loc), y in (await state.query_yields()).items():
+        c = per_city.setdefault(loc, {"searched": 0, "found": 0, "new": 0, "last_run_at": ""})
+        c["searched"] += 1
+        c["found"] += y["last_found"]
+        c["new"] += y["last_new"]
+        c["last_run_at"] = max(c["last_run_at"], y["last_run_at"])
+    terms = len(icp.industries) or 1
+    for c in per_city.values():
+        c["searches"] = terms
+    configured = {c.lower() for c in icp.geography}
+    added = [{"name": c["name"], "coordinate": c["coordinate"], "reason": c["reason"], "added_at": c["added_at"]}
+             for c in await state.discovery_cities() if c["name"].lower() not in configured]
+    return {"cities": [{"name": c, "coordinate": coords.get(c, "")} for c in icp.geography],
+            "added": added, "yields": per_city,
+            "expand": bool(config.discovery.expand_cities),
+            "per_week": config.discovery.city_additions_per_week}
+
+
+@app.delete("/api/settings/geography/added/{name}")
+async def remove_added_city(name: str):
+    """Take out a city Harvey added: it is never searched or proposed again."""
+    if not await _state().remove_discovery_city(name):
+        return _refuse("Harvey didn't add that city, or it was already taken out.", 404)
+    return {"success": True}
 
 
 @app.post("/api/settings/geography")
