@@ -2750,6 +2750,21 @@ class StateManager:
                 rows = await cursor.fetchall()
                 return {row[0]: row[1] for row in rows}
 
+    async def optouts_by_channel(self) -> dict[str, dict[str, int]]:
+        """Per channel: people sent at least one message, and how many of them
+        opted out (status or an unsubscribe reply, counted once each)."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT o.channel, COUNT(DISTINCT o.prospect_id),"
+                " COUNT(DISTINCT CASE WHEN p.status = 'opted_out' OR EXISTS ("
+                "   SELECT 1 FROM conversations c WHERE c.prospect_id = o.prospect_id"
+                "   AND c.intent = 'unsubscribe') THEN o.prospect_id END)"
+                " FROM outbox o JOIN prospects p ON p.id = o.prospect_id"
+                " WHERE o.status = 'sent' GROUP BY o.channel"
+            ) as cursor:
+                return {ch or "email": {"reached": n, "opted_out": o}
+                        for ch, n, o in await cursor.fetchall()}
+
     async def funnel_by_location(self) -> list[dict]:
         """The pipeline per company location (the searched city, for most
         providers), so markets can be compared. A reply means a real one:

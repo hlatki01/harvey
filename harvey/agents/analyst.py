@@ -49,6 +49,7 @@ class Analyst:
             "intents": await self._intent_breakdown(),
             "stages": await self._stage_breakdown(),
             "cities": await self.state.funnel_by_location(),
+            "optouts": await self.state.optouts_by_channel(),
             "insights": [],
         }
 
@@ -135,10 +136,8 @@ class Analyst:
         total_queued = pipeline.get("queued", 0)
         total_contacted = pipeline.get("contacted", 0)
         total_replied = pipeline.get("replied", 0)
-        total_opted_out = pipeline.get("opted_out", 0)
         total_interested = intents.get("interested", 0)
         total_objections = intents.get("objection", 0)
-        total_unsubscribes = intents.get("unsubscribe", 0) + total_opted_out
         total_escalations = intents.get("escalate", 0)
 
         if total_contacted > 10:
@@ -155,14 +154,16 @@ class Analyst:
                     "current messaging. Scale prospecting to feed it more leads."
                 )
 
-        # Deliverability / reputation warning — the most urgent signal
-        if total_contacted > 10:
-            optout_rate = total_unsubscribes / total_contacted * 100
-            if optout_rate > 2:
+        # Reputation warning — the most urgent signal. Per channel, over everyone
+        # sent a message: an email opt-out risks the domain, a WhatsApp one the number.
+        for channel, n in sorted((report.get("optouts") or {}).items()):
+            if n["reached"] > 10 and n["opted_out"] / n["reached"] > 0.02:
+                rate = n["opted_out"] / n["reached"] * 100
                 insights.append(
-                    f"URGENT: Opt-out rate is {optout_rate:.1f}% (>2% risks blacklisting). "
-                    "Pause sending, tighten ICP targeting in harvey.yaml, and reduce "
-                    "max_daily_sends until the list quality improves."
+                    f"URGENT: {channel} opt-out rate is {rate:.1f}% ({n['opted_out']} of "
+                    f"{n['reached']} reached; >2% risks blacklisting). Pause sending, tighten "
+                    "ICP targeting in harvey.yaml, and reduce max_daily_sends until the list "
+                    "quality improves."
                 )
 
         if total_escalations > 0:

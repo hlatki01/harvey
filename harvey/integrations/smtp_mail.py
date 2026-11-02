@@ -9,8 +9,9 @@ a Google Workspace account with an app password, or self-hosted mail.
     SMTP_USERNAME=        IMAP_USERNAME=   (defaults to SMTP_USERNAME)
     SMTP_PASSWORD=        IMAP_PASSWORD=   (defaults to SMTP_PASSWORD)
 
-Sends as the configured persona (name + email). IMAP polling fetches
-UNSEEN inbox messages and marks them seen after retrieval.
+Sends as the configured persona (name + email). IMAP polling reads the
+last week of the inbox without touching read state: the owner usually reads
+the same mailbox, and a message they opened must still reach Harvey.
 """
 
 import asyncio
@@ -18,6 +19,7 @@ import email
 import email.policy
 import imaplib
 import logging
+from datetime import date, timedelta
 from email.message import EmailMessage
 from email.utils import make_msgid, parseaddr
 
@@ -31,6 +33,9 @@ from harvey.integrations.mail_provider import (
 )
 
 logger = logging.getLogger("harvey.smtp")
+
+REPLY_WINDOW_DAYS = 7  # same window as the Gmail and Microsoft providers
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()  # IMAP dates are English
 
 
 class SmtpImapProvider(MailProvider):
@@ -46,6 +51,8 @@ class SmtpImapProvider(MailProvider):
         self.imap_port = int(getattr(env, "imap_port", 993) or 993)
         self.imap_user = getattr(env, "imap_username", "") or self.smtp_user
         self.imap_pass = getattr(env, "imap_password", "") or self.smtp_pass
+        # (UIDVALIDITY, UID) -> parsed message: each one is downloaded once.
+        self._fetched: dict[tuple[bytes, bytes], InboundMessage | None] = {}
 
     def is_configured(self) -> bool:
         return bool(self.smtp_host and self.smtp_user and self.smtp_pass)
@@ -89,34 +96,38 @@ class SmtpImapProvider(MailProvider):
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
         loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(None, self._fetch_unseen, limit)
+            return await loop.run_in_executor(None, self._fetch_recent)
         except Exception as e:
             logger.error(f"IMAP fetch failed: {e}")
             return []
 
-    def _fetch_unseen(self, limit: int) -> list[InboundMessage]:
-        out: list[InboundMessage] = []
+    def _fetch_recent(self) -> list[InboundMessage]:
+        """The last REPLY_WINDOW_DAYS of the inbox, read or not, minus our own
+        mail. The handler skips what it already processed."""
         conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
         try:
             conn.login(self.imap_user, self.imap_pass)
-            conn.select("INBOX")
-            status, data = conn.search(None, "UNSEEN")
+            conn.select("INBOX", readonly=True)  # never mark the owner's mail as read
+            validity = (conn.response("UIDVALIDITY")[1] or [b""])[0] or b""
+            d = date.today() - timedelta(days=REPLY_WINDOW_DAYS)
+            status, data = conn.uid("SEARCH", None, "SINCE", f"{d.day}-{_MONTHS[d.month - 1]}-{d.year}")
             if status != "OK":
                 return []
-            ids = data[0].split()[-limit:]
-            for msg_id in ids:
-                status, parts = conn.fetch(msg_id, "(RFC822)")
-                if status != "OK" or not parts or not isinstance(parts[0], tuple):
+            keys = [(validity, uid) for uid in (data[0] or b"").split()]
+            for key in keys:
+                if key in self._fetched:
                     continue
-                parsed = self._parse_rfc822(parts[0][1])
-                if parsed:
-                    out.append(parsed)
+                status, parts = conn.uid("FETCH", key[1], "(BODY.PEEK[])")
+                if status == "OK" and parts and isinstance(parts[0], tuple):
+                    self._fetched[key] = self._parse_rfc822(parts[0][1])
+            self._fetched = {k: self._fetched[k] for k in keys if k in self._fetched}
         finally:
             try:
                 conn.logout()
             except Exception:
                 pass
-        return out
+        me = {self.imap_user.lower(), (self.config.persona.email or "").lower()}
+        return [m for k in keys if (m := self._fetched.get(k)) and m.from_email not in me]
 
     @staticmethod
     def _parse_rfc822(raw: bytes) -> InboundMessage | None:
