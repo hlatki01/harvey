@@ -232,9 +232,19 @@ class WhatsAppSender:
         facts = [f"- {SIGNAL_FACTS[s]}" for s in signals if s in SIGNAL_FACTS]
         persona, product = self.config.persona, self.config.product
         demo = find_demo(company.industry, self.cfg.demos)
-        demo_rule = (f"\n- We already have a ready example site for a {demo.label} business: say so in a few words "
-                     f"and write {DEMO_TOKEN} where its link goes (never a URL yourself); it is the only link allowed."
-                     if demo else "")
+        # A matched demo means the kind of business is known: talk to it, don't ask.
+        if demo:
+            about = ("Mention one observed fact if there is one. You know what they do: "
+                     "never ask what they do or what they work with.")
+            kind = (f"You may say you work with businesses like theirs ({demo.label}). "
+                    "Never mention a city or region.")
+            demo_rule = (f"\n- We already have a ready example site for {demo.label}: say so in a few words "
+                         f"and write {DEMO_TOKEN} where its link goes (never a URL yourself); it is the only link allowed.")
+        else:
+            about = "Mention one observed fact if there is one, otherwise ask what they do."
+            kind = ("Never mention a city or region, and never say what kind of business they are "
+                    '(the listed type can be wrong): say "pequenos negócios".')
+            demo_rule = ""
         prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}. Tone: {persona.tone}.
 You sell: {product.name} - {product.description}
 
@@ -248,10 +258,10 @@ Observed facts (use at most one; never invent others):
 
 Rules:
 - One message, at most 45 words, plain text, no links of your own, no markdown.
-- Say who you are in the first sentence. Mention one observed fact if there is one, otherwise ask what they do.
-- End with one easy yes/no question. Do not pitch a price or a meeting.
+- Say who you are in the first sentence. {about}
+- End with exactly one easy yes/no question, and ask no other question. Do not pitch a price or a meeting.
 - Sound like a person typing on a phone. No greeting formulas, no emojis, no sales words.
-- Never mention a city or region, and never say what kind of business they are (the listed type can be wrong): say "pequenos negócios".
+- {kind}
 - Refer to the company without any web address (no ".com" or ".me").
 - Do not add an opt-out line; the system adds it.{demo_rule}
 {self.skills}
