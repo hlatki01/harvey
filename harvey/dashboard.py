@@ -641,6 +641,90 @@ async def get_companies(q: str = "", page: int = 1, sort: str = "created_at", di
     return {"rows": rows, "total": total, "page": page, "per_page": COMPANIES_PAGE}
 
 
+_CONTACT_TEXT = ("first_name", "last_name", "title", "email", "phone", "linkedin_url")
+
+
+async def _contact_fields(state, data: dict, prospect_id: str = ""):
+    """The contact fields in a request, checked and ready to store, plus
+    what an address or number now grades as; (fields, "") or (None, why)."""
+    from harvey.config import load_config, load_env
+    from harvey.integrations.email_finder import verify_published_address
+    from harvey.phone import normalize_phone
+    from harvey.users import valid_email
+    fields = {}
+    for key in _CONTACT_TEXT:
+        if key in data:
+            value = data[key]
+            if not isinstance(value, str) or len(value) > 300:
+                return None, f"{key} must be text (up to 300 characters)."
+            fields[key] = " ".join(value.split())
+    if "email" in fields:
+        email = fields["email"].lower()
+        if email and not valid_email(email):
+            return None, "That email address doesn't look right."
+        other = await state.get_prospect_by_email(email) if email else None
+        if other and other.id != prospect_id:
+            return None, f"{email} is already a contact{' at ' + other.company if other.company else ''}."
+        # Graded like any address Harvey finds: only a deliverable one gets cold email.
+        status = await verify_published_address(email, load_env()) if email else ""
+        fields.update(email=email, email_status=status, email_verified=status == "verified")
+    if "phone" in fields:
+        phone = normalize_phone(fields["phone"], load_config().channels.whatsapp.default_country_code) \
+            if fields["phone"] else ""
+        if fields["phone"] and not phone:
+            return None, "That phone number doesn't look right. Include the area code."
+        other = await state.get_prospect_by_phone(phone) if phone else None
+        if other and other.id != prospect_id:
+            return None, f"{phone} is already a contact{' at ' + other.company if other.company else ''}."
+        fields.update(phone=phone, phone_verified=False)
+    if fields.get("linkedin_url") and urlparse(fields["linkedin_url"]).scheme not in ("http", "https"):
+        return None, "The LinkedIn address must start with https://."
+    return fields, ""
+
+
+@app.post("/api/companies/{company_id}/contacts")
+async def add_contact(company_id: str, request: Request):
+    """Add a person at a company by hand. They go through the same checks as
+    anyone Harvey finds: an email is verified before any cold email."""
+    from harvey.models.prospect import Prospect
+    state = _state()
+    company = await state.get_company(company_id)
+    if not company:
+        return JSONResponse({"success": False, "message": "No such company."}, status_code=404)
+    fields, why = await _contact_fields(state, await _json_body(request))
+    if why:
+        return _refuse(why)
+    if not any(fields.get(k) for k in ("first_name", "last_name", "email", "phone")):
+        return _refuse("Give at least a name, an email or a phone.")
+    prospect = Prospect(company_id=company.id, company=company.name, industry=company.industry,
+                        source="manual", status="new", **fields)
+    prospect_id = await state.add_prospect(prospect)
+    return {"success": True, "id": prospect_id, "email_status": fields.get("email_status", "")}
+
+
+@app.patch("/api/prospects/{prospect_id}")
+async def edit_contact(prospect_id: str, request: Request):
+    state = _state()
+    if not await state.get_prospect(prospect_id):
+        return JSONResponse({"success": False, "message": "No such contact."}, status_code=404)
+    fields, why = await _contact_fields(state, await _json_body(request), prospect_id)
+    if why:
+        return _refuse(why)
+    if not fields:
+        return _refuse("Nothing to change.")
+    await state.update_contact(prospect_id, **fields)
+    return {"success": True, "email_status": fields.get("email_status", "")}
+
+
+@app.delete("/api/prospects/{prospect_id}")
+async def delete_contact(prospect_id: str):
+    """Delete a contact nobody has written to yet, with their unsent messages."""
+    refused = await _state().remove_contact(prospect_id)
+    if refused:
+        return _refuse(refused)
+    return {"success": True}
+
+
 @app.get("/api/companies/industries")
 async def company_industries():
     """The kinds of business already on file, most common first: the choices

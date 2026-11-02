@@ -89,3 +89,50 @@ def test_a_company_with_history_is_not_deleted(db):
 
 def test_industries_are_the_ones_on_file_most_common_first(db):
     assert db.get("/api/companies/industries").json() == [{"name": "Pet store", "n": 29}, {"name": "Dentist", "n": 1}]
+
+
+@pytest.fixture
+def graded(monkeypatch):
+    """Email grading without the network: anything at bello.com.br verifies."""
+    async def grade(email, env=None):
+        return "verified" if email.endswith("@bello.com.br") else "guess"
+    monkeypatch.setattr("harvey.integrations.email_finder.verify_published_address", grade)
+
+
+def test_add_edit_and_delete_a_contact(db, graded):
+    r = db.post("/api/companies/c01/contacts", json={
+        "first_name": "Ana", "last_name": "Souza", "title": "Dona",
+        "email": "Ana@Bello.com.br", "phone": "(41) 99899-8698"}).json()
+    assert r["success"] and r["email_status"] == "verified"
+    pid = r["id"]
+    assert _sql(db.db_path, "SELECT company_id, email, email_status, email_verified, phone, source, status "
+                            "FROM prospects WHERE id=?", (pid,)) == [
+        ("c01", "ana@bello.com.br", "verified", 1, "5541998998698", "manual", "new")]
+    assert [p["first_name"] for p in db.get("/api/companies/c01/contacts").json()] == ["Ana"]
+
+    r = db.patch(f"/api/prospects/{pid}", json={"email": "ana@gmail.com", "title": "Sócia"}).json()
+    assert r["success"] and r["email_status"] == "guess"     # a new address is graded again
+    assert _sql(db.db_path, "SELECT title, email_status, email_verified FROM prospects WHERE id=?", (pid,)) == [
+        ("Sócia", "guess", 0)]
+
+    assert db.delete(f"/api/prospects/{pid}").json()["success"]
+    assert db.get("/api/companies/c01/contacts").json() == []
+
+
+def test_contact_input_is_checked(db, graded):
+    assert db.post("/api/companies/c01/contacts", json={"title": "Dona"}).status_code == 409
+    assert db.post("/api/companies/c01/contacts", json={"first_name": "A", "email": "not-an-email"}).status_code == 409
+    assert db.post("/api/companies/c01/contacts", json={"first_name": "A", "phone": "123"}).status_code == 409
+    assert db.post("/api/companies/c01/contacts", json={"first_name": "A", "linkedin_url": "javascript:x"}).status_code == 409
+    assert db.post("/api/companies/nope/contacts", json={"first_name": "A"}).status_code == 404
+    db.post("/api/companies/c01/contacts", json={"first_name": "A", "phone": "41 99899-8698"})
+    dup = db.post("/api/companies/c02/contacts", json={"first_name": "B", "phone": "(41) 99899-8698"})
+    assert dup.status_code == 409 and "already a contact" in dup.json()["message"]
+
+
+def test_a_contact_with_history_is_not_deleted(db):
+    _sql(db.db_path, "INSERT INTO prospects (id, company_id, status) VALUES ('p5', 'c05', 'replied')")
+    _sql(db.db_path, "INSERT INTO conversations (id, prospect_id, thread_json, status) VALUES ('v5', 'p5', '[]', 'open')")
+    r = db.delete("/api/prospects/p5")
+    assert r.status_code == 409 and "history" in r.json()["message"]
+    assert db.delete("/api/prospects/nope").status_code == 409

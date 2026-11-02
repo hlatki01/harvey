@@ -965,6 +965,50 @@ class StateManager:
             await db.commit()
             return cursor.rowcount > 0
 
+    CONTACT_EDITABLE = ("first_name", "last_name", "title", "email", "email_status",
+                        "email_verified", "phone", "phone_verified", "linkedin_url")
+
+    async def update_contact(self, prospect_id: str, **fields) -> bool:
+        """Change the fields a person can edit on a contact."""
+        values = {k: v for k, v in fields.items() if k in self.CONTACT_EDITABLE}
+        if "email" in values:
+            values["email"] = _norm(values["email"])
+        if not values:
+            return False
+        sets = ", ".join(f"{k} = ?" for k in values)
+        async with self._connect() as db:
+            cur = await db.execute(
+                f"UPDATE prospects SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (*values.values(), prospect_id))
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def remove_contact(self, prospect_id: str) -> str:
+        """Delete a contact and its unsent messages; "" on success. Refused
+        once Harvey wrote to them or talked with them: that history stays."""
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                if not await (await db.execute(
+                        "SELECT 1 FROM prospects WHERE id = ?", (prospect_id,))).fetchone():
+                    await db.rollback()
+                    return "No such contact."
+                talked = await (await db.execute(
+                    "SELECT (SELECT COUNT(*) FROM conversations WHERE prospect_id = ?)"
+                    " + (SELECT COUNT(*) FROM outbox WHERE prospect_id = ? AND status IN ('sent', 'sending'))",
+                    (prospect_id, prospect_id))).fetchone()
+                if talked[0]:
+                    await db.rollback()
+                    return "Harvey already wrote to or talked with this contact, so they stay (their history would go with them)."
+                await db.execute("DELETE FROM outbox WHERE prospect_id = ?", (prospect_id,))
+                await db.execute("DELETE FROM observations WHERE prospect_id = ?", (prospect_id,))
+                await db.execute("DELETE FROM prospects WHERE id = ?", (prospect_id,))
+                await db.commit()
+                return ""
+            except Exception:
+                await db.rollback()
+                raise
+
     async def get_prospect_by_email(self, email: str) -> Prospect | None:
         """Look up a prospect by email address (indexed, case-insensitive)."""
         email = _norm(email)
