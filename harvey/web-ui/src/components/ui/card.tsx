@@ -15,7 +15,7 @@ export function Subhead({ className, children, hint }: { className?: string; chi
   return (
     <div className={cn('mb-2 mt-7 flex items-baseline gap-2 text-[12px] font-medium uppercase tracking-wide text-text-3 first:mt-0', className)}>
       {children}
-      {hint && <span className="ml-auto text-[12px] font-normal normal-case tracking-normal">{hint}</span>}
+      {hint != null && hint !== '' && <span className="ml-auto text-[12px] font-normal normal-case tracking-normal">{hint}</span>}
     </div>
   )
 }
