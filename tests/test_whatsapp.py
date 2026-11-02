@@ -12,7 +12,7 @@ import pytest_asyncio
 
 from harvey.agents.handler import Handler
 from harvey.agents.whatsapp import WhatsAppSender
-from harvey.config import DemoConfig, EnvConfig, WhatsAppChannelConfig, load_config
+from harvey.config import DemoConfig, EnvConfig, NotifyConfig, WhatsAppChannelConfig, load_config
 from harvey.gate import whatsapp_check
 from harvey.integrations.evolution import EvolutionClient, WhatsAppInbound
 from harvey.integrations.mail_provider import SendResult
@@ -319,6 +319,10 @@ class StubBrain:
 def _config(**overrides):
     config = load_config()
     config.channels.whatsapp = WhatsAppChannelConfig(enabled=True, **overrides)
+    # The real config's hours would tie tests to the clock; its alert number
+    # would get pushes the tests don't expect.
+    config.usage.business_hours = {}
+    config.notify = NotifyConfig()
     return config
 
 

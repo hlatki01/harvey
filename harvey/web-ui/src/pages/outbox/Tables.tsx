@@ -4,7 +4,7 @@ import { Card, Subhead } from '@/components/ui/card'
 import { StatusBadge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/field'
-import { formatDate } from '@/lib/format'
+import { formatDate, parseTs } from '@/lib/format'
 import { useApi } from '@/lib/hooks'
 import type { OutboxItem } from './types'
 
@@ -26,6 +26,14 @@ export function reason(error?: string) {
   if (!error) return ''
   for (const [re, text] of REASONS) if (re.test(error)) return text.endsWith(': ') ? text + error.replace(re, '') : text
   return error
+}
+
+// When it goes out, not just when it was first scheduled: an overdue row waits
+// its turn, and one outside business hours waits for the next opening.
+function sends(r: OutboxItem) {
+  const overdue = !!r.send_at && parseTs(r.send_at).getTime() < Date.now()
+  if (r.sends_from) return (overdue ? 'Overdue · from ' : 'From ') + formatDate(r.sends_from)
+  return overdue ? 'Overdue · next in line' : formatDate(r.send_at)
 }
 
 const who = (r: OutboxItem) => r.company ? `${r.company} · ${r.to_email}` : r.to_email
@@ -57,6 +65,7 @@ function Detail({ r, onClose }: { r: OutboxItem; onClose: () => void }) {
           </div>
         )}
         {row('Scheduled for', r.status === 'sent' ? '' : formatDate(r.send_at))}
+        {row('Goes out', r.status === 'approved' ? sends(r) : '')}
         {row('Sent', r.sent_at ? formatDate(r.sent_at) : '')}
         {row('Last change', r.status === 'sent' ? '' : formatDate(r.updated_at))}
         {r.channel !== 'whatsapp' && row('Subject', r.subject)}
@@ -127,7 +136,7 @@ export function OutboxTables() {
         { head: 'To', cell: who },
         { head: 'Message', cell: what },
         { head: 'Text', muted: true, cell: r => r.body },
-        { head: 'Sends', muted: true, cell: r => r.status === 'sending' ? <StatusBadge status={r.status} /> : formatDate(r.send_at) },
+        { head: 'Sends', muted: true, cell: r => r.status === 'sending' ? <StatusBadge status={r.status} /> : sends(r) },
       ]} />
       <Table title="Recently sent" group="sent" onOpen={setOpen} cols={[
         { head: 'To', cell: who },

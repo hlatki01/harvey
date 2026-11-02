@@ -114,3 +114,22 @@ async def test_approvals_push_at_most_once_per_window(state):
     await notify.push_alerts(state, config, client)
     assert [t for _, t in client.sent] == [
         "Harvey: 1 message waiting for approval. Nothing goes out until you approve it."]
+
+
+@pytest.mark.asyncio
+async def test_a_hand_over_push_links_straight_to_the_conversation(state):
+    await _contacted_prospect(state)
+    client = FakeEvolution()
+    client.inbound = [WhatsAppInbound("M1", "5511987654321", "Em quantos dias fica pronto?")]
+    handler = _handler(state, client, StubBrain(
+        intent="question", action="handoff", text="Vou confirmar com a equipe e já te respondo."))
+    handler.config = _notifying(events=[])        # handed over before alerts were on
+    handler.config.dashboard.public_url = "https://painel.example.com"
+    await handler.run_whatsapp()
+    assert not [n for n, _ in client.sent if n == OWNER]
+
+    handler.config.notify.events = ["handoff"]    # the heartbeat's sweep catches it up, with the link
+    await notify.push_alerts(state, handler.config, client)
+    convo_id = (await state.get_handoffs())[0]["id"]
+    pushes = [t for n, t in client.sent if n == OWNER]
+    assert len(pushes) == 1 and pushes[0].endswith(f"\nhttps://painel.example.com/?conversation={convo_id}")

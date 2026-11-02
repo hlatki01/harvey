@@ -52,6 +52,12 @@ def _who(row) -> str:
     return name or company or "A lead"
 
 
+def conversation_link(config, convo_id: str) -> str:
+    """A line opening this conversation on the dashboard, or "" without dashboard.public_url."""
+    base = getattr(getattr(config, "dashboard", None), "public_url", "")
+    return f"\n{base}/?conversation={convo_id}" if base and convo_id else ""
+
+
 async def push(state, config, event: str, key: str, text: str, client=None) -> bool:
     """Send `text` to the owner once per `key`. Never raises; True if it went out."""
     number = owner_number(config)
@@ -81,14 +87,14 @@ async def on_stage_change(state, config, prospect, convo, old_stage: str, reply_
         return
     await push(state, config, "hot_lead", f"hot:{convo.id}:{convo.stage}",
                f"Harvey: hot lead, {_who(prospect)} is now {convo.stage} ({convo.channel}).\n"
-               f"\"{reply_text[:300]}\"", client)
+               f"\"{reply_text[:300]}\"" + conversation_link(config, convo.id), client)
 
 
 async def push_handoff(state, config, prospect, convo, reply_text: str, client=None) -> None:
     # One push per conversation: a chat handed over twice is still the same chat on your list.
     await push(state, config, "handoff", f"handoff:{convo.id}",
-               f"Harvey: {_who(prospect)} needs you ({convo.channel}).\n\"{reply_text[:300]}\"",
-               client)
+               f"Harvey: {_who(prospect)} needs you ({convo.channel}).\n\"{reply_text[:300]}\""
+               + conversation_link(config, convo.id), client)
 
 
 async def state_alerts(state) -> list[tuple]:
@@ -121,9 +127,10 @@ async def push_alerts(state, config, client=None) -> None:
     if not owner_number(config):
         return
     window = int(time.time() // (_settings(config).approvals_every_minutes * 60))
-    for key, title, detail, *_ in await state_alerts(state):
+    for key, title, detail, _tone, _tab, target, _sig in await state_alerts(state):
         if key.startswith("handoff:"):
             event, push_key = "handoff", key
+            detail += conversation_link(config, target)
         elif key == "approvals":
             event, push_key = "approvals", f"approvals:{window}"
         else:

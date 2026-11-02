@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from harvey.brain import Brain
 from harvey.config import (
     HarveyConfig, EnvConfig, cold_daily_cap, compliance_footer_lines, compliance_notice,
-    compliance_of,
+    compliance_of, closed_until,
 )
 from harvey.gate import pre_send_check
 from harvey.integrations.instantly import InstantlyClient
@@ -550,6 +550,11 @@ class Sender:
                 f"Sender: mail provider '{self.provider.name}' is not configured "
                 "yet — outbox is holding. See CLAUDE.md → provider setup."
             )
+            return
+        opens = closed_until(self.config)
+        if opens:
+            # Approved items stay due and go out at the next opening.
+            logger.info(f"Sender: outside business hours; holding sends until {opens:%a %H:%M}.")
             return
 
         max_daily = self.config.channels.email.max_daily_sends

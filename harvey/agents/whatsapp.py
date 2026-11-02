@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from harvey.agents.sender import follow_up_order
 from harvey.agents.writer import Writer
 from harvey.brain import Brain, BrainUnavailable
-from harvey.config import HarveyConfig
+from harvey.config import HarveyConfig, closed_until
 from harvey.decide import find_demo
 from harvey.site_probe import find_own_site
 from harvey.gate import chat_brand, whatsapp_check
@@ -356,6 +356,12 @@ Return ONLY a JSON array:
     async def _drain(self, replies_only: bool = False):
         if not self.client.is_configured():
             logger.warning("WhatsApp: Evolution API is not configured; the outbox is holding.")
+            return
+        opens = closed_until(self.config)
+        if opens:
+            # Approved items stay due and go out at the next opening.
+            # The live loop polls every few seconds: keep its note out of the log.
+            (logger.debug if replies_only else logger.info)(f"WhatsApp: outside business hours; holding sends until {opens:%a %H:%M}.")
             return
         sent_today = await self.state.count_outbox_sent_today(channel="whatsapp")
         budget = min(MAX_SENDS_PER_CYCLE, self.cfg.max_daily_sends - sent_today)

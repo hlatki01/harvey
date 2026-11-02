@@ -36,12 +36,14 @@ export function ConversationsPage() {
   const jump = useRef(!!sel)   // land on the page that holds the selected conversation
   const autoFilter = useRef(true)
 
-  // Deep link from a notification.
+  // Deep link from a notification: land on "Open" when it's there, else "All".
   useEffect(() => {
-    if (!params.conversation) return
-    setFilter('all'); setSel(params.conversation); jump.current = true; autoFilter.current = false
+    if (!params.conversation || !data) return
+    const c = data.find(x => x.id === params.conversation)
+    setFilter(c && FILTERS[1][2](c) ? 'open' : 'all')
+    setSel(params.conversation); jump.current = true; autoFilter.current = false
     clearParams()
-  }, [params.conversation, clearParams])
+  }, [params.conversation, data, clearParams])
 
   // Open on "Needs you" only when something needs you.
   useEffect(() => {
@@ -57,11 +59,11 @@ export function ConversationsPage() {
   }, [data, filter])
 
   useEffect(() => {
-    if (!shown.length) return
+    if (!shown.length || params.conversation) return   // a deep link is about to pick
     const at = shown.findIndex(c => c.id === sel)
     if (at < 0) { setSel(shown[0].id); setPage(0) }
     else if (jump.current) { setPage(Math.floor(at / PAGE)); jump.current = false }
-  }, [shown, sel])
+  }, [shown, sel, params.conversation])
 
   if (data === undefined) return <><Head /><Skeleton rows={5} /></>
   if (!data) return <><Head /><OfflineState /></>

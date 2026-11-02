@@ -1,10 +1,11 @@
 """Configuration loader for Harvey. Reads harvey.yaml + .env."""
 
 import logging
+from functools import lru_cache
 import os
 import re
 from urllib.parse import urlparse
-from datetime import date as _date, time as _time
+from datetime import date as _date, datetime as _datetime, time as _time, timedelta as _timedelta, timezone as _timezone
 from pathlib import Path
 
 import yaml
@@ -490,10 +491,44 @@ class QuietHoursConfig(BaseModel):
         return v
 
 
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_SPAN_RE = re.compile(r"(\d{2}:\d{2})-(\d{2}:\d{2})")
+
+
 class UsageConfig(BaseModel):
     max_daily_claude_percent: float = 80.0
     heartbeat_interval_minutes: int = 15
     quiet_hours: QuietHoursConfig = QuietHoursConfig()
+    # When automatic email/WhatsApp may go out: weekday -> "HH:MM-HH:MM" in
+    # quiet_hours.timezone. A day left out is closed; empty = any time.
+    business_hours: dict[str, str] = {}
+    # Two-letter country whose national holidays are closed too ("" = none).
+    holidays_country: str = ""
+
+    @field_validator("holidays_country")
+    @classmethod
+    def _valid_holidays_country(cls, v: str) -> str:
+        v = (v or "").strip().upper()
+        if v:
+            import holidays
+            if v not in holidays.list_supported_countries():
+                raise ValueError(f"holidays_country '{v}' is not a supported two-letter country code, e.g. 'BR'.")
+        return v
+
+    @field_validator("business_hours")
+    @classmethod
+    def _valid_business_hours(cls, v: dict[str, str]) -> dict[str, str]:
+        for day, span in v.items():
+            if day not in WEEKDAYS:
+                raise ValueError(f"business_hours: '{day}' is not one of {', '.join(WEEKDAYS)}.")
+            m = _SPAN_RE.fullmatch(str(span).strip())
+            try:
+                start, end = (_time.fromisoformat(t) for t in m.groups()) if m else (None, None)
+            except ValueError:
+                start = end = None
+            if start is None or start >= end:
+                raise ValueError(f"business_hours.{day} '{span}' must look like '09:00-18:00'.")
+        return v
 
     @field_validator("max_daily_claude_percent")
     @classmethod
@@ -508,6 +543,36 @@ class UsageConfig(BaseModel):
         if v < 1:
             raise ValueError("heartbeat_interval_minutes must be at least 1")
         return v
+
+
+@lru_cache(maxsize=None)
+def _national_holidays(country: str):
+    if not country:
+        return ()
+    import holidays
+    return holidays.country_holidays(country)  # fills in each year as it's asked
+
+
+def closed_until(config, now: _datetime | None = None) -> _datetime | None:
+    """None while automatic sends may go out, else when business hours next open."""
+    usage = getattr(config, "usage", None)
+    if not getattr(usage, "business_hours", None):
+        return None
+    import pytz
+    tz = pytz.timezone(usage.quiet_hours.timezone)
+    now = (now or _datetime.now(_timezone.utc)).astimezone(tz)
+    for ahead in range(31):  # a week, plus room for holidays in a row
+        day = (now + _timedelta(days=ahead)).date()
+        span = usage.business_hours.get(WEEKDAYS[day.weekday()])
+        if not span or day in _national_holidays(getattr(usage, "holidays_country", "")):
+            continue
+        start, end = (_time.fromisoformat(t) for t in _SPAN_RE.fullmatch(span.strip()).groups())
+        opens = tz.localize(_datetime.combine(day, start))
+        if ahead == 0 and opens <= now < tz.localize(_datetime.combine(day, end)):
+            return None
+        if opens > now:
+            return opens
+    return None
 
 
 BRAIN_PROVIDERS = ("claude", "codex")

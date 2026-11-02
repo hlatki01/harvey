@@ -21,6 +21,15 @@ function recall(): TabId {
   } catch { return 'today' }
 }
 
+/** ?conversation=<id>, the link in a WhatsApp alert. It stays in the address
+ *  bar until the page uses it, so it survives the sign-in reload. */
+function linked(): Record<string, string> {
+  try {
+    const id = new URLSearchParams(window.location.search).get('conversation') || ''
+    return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? { conversation: id } : {}
+  } catch { return {} }
+}
+
 interface Nav {
   tab: TabId
   /** Jump to a tab; `params` carries a deep link (e.g. {conversation: id}). */
@@ -34,13 +43,16 @@ const NavCtx = createContext<Nav>({ tab: 'today', goTab: () => {}, params: {}, c
 export const useNav = () => useContext(NavCtx)
 
 export function NavProvider({ children }: { children: React.ReactNode }) {
-  const [tab, setTab] = useState<TabId>(recall)
-  const [params, setParams] = useState<Record<string, string>>({})
+  const [params, setParams] = useState<Record<string, string>>(linked)
+  const [tab, setTab] = useState<TabId>(() => (params.conversation ? 'conversations' : recall()))
   const goTab = useCallback((t: TabId, p: Record<string, string> = {}) => {
     try { localStorage.setItem(KEY, t) } catch { /* private mode */ }
     setParams(p)
     setTab(t)
   }, [])
-  const clearParams = useCallback(() => setParams({}), [])
+  const clearParams = useCallback(() => {
+    setParams({})
+    if (window.location.search) history.replaceState(null, '', window.location.pathname)
+  }, [])
   return <NavCtx.Provider value={{ tab, goTab, params, clearParams }}>{children}</NavCtx.Provider>
 }

@@ -85,6 +85,11 @@ usage:
     start: "22:00"
     end: "07:00"
     timezone: "America/New_York"
+  # When automatic email/WhatsApp may go out, in quiet_hours.timezone. A day
+  # left out is closed; leave it out entirely to send at any time.
+  # business_hours: { mon: "09:00-18:00", tue: "09:00-18:00", wed: "09:00-18:00",
+  #                   thu: "09:00-18:00", fri: "09:00-18:00", sat: "09:00-13:00" }
+  # holidays_country: "BR"   # national holidays of this country are closed too
 
 # Optional: check each new recipient with Precleared (precleared.dev) before
 # the first cold email: may cold marketing email go to this address under UK

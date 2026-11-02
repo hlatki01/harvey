@@ -202,6 +202,7 @@ These go in `harvey.yaml` under `usage:`. Use sensible defaults unless they want
 - `max_daily_claude_percent`: 80 (how much of daily Claude quota to use)
 - `heartbeat_interval_minutes`: 15 (how often Harvey checks for work)
 - `quiet_hours`: 22:00-07:00 in their timezone
+- `business_hours`: when automatic email/WhatsApp may go out, e.g. `{mon: "09:00-18:00", ..., sat: "09:00-13:00"}` plus `holidays_country: "BR"` to close national holidays (Settings → Hours); outside it, sends wait for the next opening
 - `max_daily_sends`: 50 (email send limit)
 
 ### Step 7: Start Harvey

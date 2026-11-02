@@ -22,6 +22,7 @@ export interface OutboxItem {
   channel?: string
   status?: string
   send_at?: string
+  sends_from?: string   // business hours hold it until then
   sent_at?: string
   updated_at?: string
   error?: string

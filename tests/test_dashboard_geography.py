@@ -58,3 +58,18 @@ def test_bad_input_is_refused_and_the_file_untouched(client, cities):
     r = client.post("/api/settings/geography", json={"cities": cities})
     assert r.status_code == 409 and not r.json()["success"]
     assert client.cfg.read_text(encoding="utf-8") == before
+
+
+def test_business_hours_round_trip(client):
+    days = {"mon": "09:00-18:00", "tue": "09:00-18:00", "wed": "09:00-18:00", "thu": "09:00-18:00",
+            "fri": "09:00-18:00", "sat": "09:00-13:00", "sun": ""}
+    assert client.post("/api/settings/business-hours", json={"days": days, "holidays_country": "br"}).json()["success"]
+    usage = load_config(str(client.cfg)).usage
+    assert usage.business_hours == {d: s for d, s in days.items() if s} and usage.holidays_country == "BR"
+    assert client.get("/api/settings/business-hours").json()["days"] == days
+    r = client.post("/api/settings/business-hours", json={"days": days, "holidays_country": "XX"})
+    assert r.status_code == 409
+    # A bad span is refused and the file left as it was.
+    before = client.cfg.read_text(encoding="utf-8")
+    r = client.post("/api/settings/business-hours", json={"days": {**days, "mon": "18:00-09:00"}})
+    assert r.status_code == 409 and client.cfg.read_text(encoding="utf-8") == before

@@ -445,13 +445,13 @@ async def save_env_settings(request: Request):
 _COORD_RE = re.compile(r"-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?(,\d{1,4})?")
 
 
-def _replace_icp_key(lines: list[str], key: str, block: list[str]) -> list[str]:
-    """Swap `icp.<key>` (the line and its indented body) for `block`, leaving
-    every other line, comments included, as it was. Appended to the icp
+def _replace_section_key(lines: list[str], section: str, key: str, block: list[str]) -> list[str]:
+    """Swap `<section>.<key>` (the line and its indented body) for `block`,
+    leaving every other line, comments included, as it was. Appended to the
     section when the key isn't there yet."""
-    icp = next((i for i, l in enumerate(lines) if re.match(r"icp:\s*(#.*)?$", l)), None)
+    icp = next((i for i, l in enumerate(lines) if re.match(rf"{section}:\s*(#.*)?$", l)), None)
     if icp is None:
-        raise ValueError("no icp: section in the config file")
+        raise ValueError(f"no {section}: section in the config file")
     end = next((i for i in range(icp + 1, len(lines))
                 if lines[i].strip() and not lines[i][0].isspace()), len(lines))
     start = next((i for i in range(icp + 1, end)
@@ -482,7 +482,6 @@ async def save_geography(request: Request):
     """Rewrite icp.geography and icp.geo_coordinates. The result is loaded
     as a full config before it replaces the file, so a bad save can't stop
     Harvey from starting."""
-    from harvey.config import ConfigError, load_config
     data = await _json_body(request)
     raw = data.get("cities")
     if not isinstance(raw, list) or len(raw) > 50:
@@ -509,19 +508,28 @@ async def save_geography(request: Request):
     q = json.dumps  # a JSON string is a valid double-quoted YAML scalar
     lines = read_user_text(path).split("\n")
     try:
-        lines = _replace_icp_key(lines, "geography", ["  geography:"] + [f"    - {q(n, ensure_ascii=False)}" for n in names])
-        lines = _replace_icp_key(lines, "geo_coordinates",
-                                 ["  geo_coordinates:"] + [f"    {q(n, ensure_ascii=False)}: {q(c)}" for n, c in coords.items()]
-                                 if coords else ["  geo_coordinates: {}"])
+        lines = _replace_section_key(lines, "icp", "geography", ["  geography:"] + [f"    - {q(n, ensure_ascii=False)}" for n in names])
+        lines = _replace_section_key(lines, "icp", "geo_coordinates",
+                                     ["  geo_coordinates:"] + [f"    {q(n, ensure_ascii=False)}: {q(c)}" for n, c in coords.items()]
+                                     if coords else ["  geo_coordinates: {}"])
     except ValueError as e:
         return _refuse(str(e))
+    return _write_config_lines(path, lines) or {
+        "success": True, "cities": len(names), "harvey_running": bool(_check_harvey_pid())}
+
+
+def _write_config_lines(path, lines: list[str]):
+    """Write the config, loaded as a full config first so a bad save can't
+    stop Harvey from starting. A refusal response, or None once written."""
+    from pydantic import ValidationError
+    from harvey.config import ConfigError, load_config
     text = "\n".join(lines)
     fd, tmp = tempfile.mkstemp(prefix="harvey.", suffix=".yaml")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         load_config(tmp)
-    except ConfigError as e:
+    except (ConfigError, ValidationError) as e:
         return _refuse(f"Not saved: {e}")
     finally:
         os.unlink(tmp)
@@ -533,7 +541,45 @@ async def save_geography(request: Request):
     except OSError as e:
         logger.warning("Failed to write %s: %s", path, e)
         return _refuse(f"Could not write {path.name}: is it mounted read-only?")
-    return {"success": True, "cities": len(names), "harvey_running": bool(_check_harvey_pid())}
+    return None
+
+
+# ── Business hours: when automatic email/WhatsApp may go out ──
+
+@app.get("/api/settings/business-hours")
+async def get_business_hours():
+    from harvey.config import WEEKDAYS, load_config
+    usage = load_config(str(_resolve_config_file())).usage
+    return {"days": {d: usage.business_hours.get(d, "") for d in WEEKDAYS},
+            "timezone": usage.quiet_hours.timezone, "holidays_country": usage.holidays_country}
+
+
+@app.post("/api/settings/business-hours")
+async def save_business_hours(request: Request):
+    """Rewrite usage.business_hours from {day: "HH:MM-HH:MM", or "" when closed},
+    and usage.holidays_country (a country code, or "" for no holidays)."""
+    from harvey.config import WEEKDAYS
+    data = await _json_body(request)
+    days = data.get("days")
+    country = data.get("holidays_country") or ""
+    if not isinstance(country, str) or len(country.strip()) > 3:
+        return _refuse("The holidays country is a two-letter code, e.g. BR.")
+    if not isinstance(days, dict) or set(days) - set(WEEKDAYS):
+        return _refuse("Send the hours for mon..sun.")
+    open_days = {d: str(days[d]).strip() for d in WEEKDAYS if str(days.get(d) or "").strip()}
+    if not open_days:
+        return _refuse("Open at least one day.")
+    path = _resolve_config_file()
+    lines = read_user_text(path).split("\n")
+    try:
+        lines = _replace_section_key(lines, "usage", "business_hours", ["  business_hours:"] + [
+            f"    {d}: {json.dumps(span)}" for d, span in open_days.items()])
+        lines = _replace_section_key(lines, "usage", "holidays_country",
+                                     [f"  holidays_country: {json.dumps(country.strip().upper())}"])
+    except ValueError as e:
+        return _refuse(str(e))
+    return _write_config_lines(path, lines) or {
+        "success": True, "harvey_running": bool(_check_harvey_pid())}
 
 
 @app.post("/api/settings/test-instantly")
@@ -1099,7 +1145,29 @@ async def outbox_list(group: str = "approved", q: str = "", page: int = 1):
     rows = await query_db(
         f"SELECT o.*, p.company AS company {base} ORDER BY {order} LIMIT ? OFFSET ?",
         params + (OUTBOX_PAGE, (page - 1) * OUTBOX_PAGE))
+    if group == "approved":
+        _add_sends_from(rows)
     return {"rows": rows, "total": total, "page": page, "per_page": OUTBOX_PAGE}
+
+
+def _add_sends_from(rows: list[dict], now: datetime | None = None) -> None:
+    """Mark rows business hours hold back with `sends_from`: when the window
+    next opens after max(send_at, now), as naive UTC like send_at. The daily
+    caps can push a row later still; that isn't predicted here."""
+    from harvey.config import closed_until, load_config
+    try:
+        config = load_config(str(_resolve_config_file()))
+    except Exception:
+        return  # no hours to show; the table still lists the rows
+    now = now or datetime.now(timezone.utc)
+    for r in rows:
+        try:
+            at = datetime.fromisoformat(r["send_at"]).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        opens = closed_until(config, max(at, now))
+        if opens:
+            r["sends_from"] = opens.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 @app.post("/api/outbox/approve-all")
