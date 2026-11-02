@@ -111,3 +111,9 @@ def test_a_different_answer_is_not_a_repeat():
                      demo=DEMO, demo_sent=False, assistant_turns=3, allowed_prices=["1.500", "297"],
                      allowed_links=[DEMO.url], flat=_flat, recent=[PRICE])
     assert d.action == "answer" and not d.overridden
+
+
+def test_a_lead_taking_the_proposal_to_the_owner_is_deferred_not_handed_off():
+    d = _run(parse_decision({"action": "defer", "reply": "Combinado, fico no aguardo!", "follow_up_days": 30}),
+             reply_text="vou encaminhar a proposta pro proprietário")
+    assert d.action == "defer" and d.follow_up_days == 7      # a named wait is kept to a week

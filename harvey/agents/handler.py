@@ -12,15 +12,18 @@ import html
 import json
 import logging
 import re
-from datetime import date, datetime, timezone
+
+import pytz
+from datetime import date, datetime, timedelta, timezone
 
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
-    DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, legacy_sending_held,
+    DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, business_days_later, closed_until, email_language,
+    compliance_of, legacy_sending_held,
 )
 from harvey.decide import (
     DEMO_TOKEN, SLOTS_TOKEN, Decision, apply_policy, find_demo, needs_review, parse_decision)
-from harvey.gate import chat_brand
+from harvey.gate import chat_brand, whatsapp_check
 from harvey import notify
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations import calendar
@@ -55,6 +58,9 @@ INTENT_LABELS = {
 # Intents that get an automated reply. Everything else is closed,
 # deferred, or escalated to a human.
 AUTO_REPLY_INTENTS = {"interested", "objection", "question", "wrong_person"}
+# A lead who said they'd get back: working days before each nudge, and how many.
+FOLLOW_UP_BUSINESS_DAYS = (2, 3, 3)
+FOLLOW_UP_MAX = 2
 
 # What the WhatsApp assistant may and may not do. It answers from the
 # knowledge base and nothing else; what it cannot ground there goes to the
@@ -86,7 +92,8 @@ Choose ONE action for the next message:
 - answer: the knowledge base covers what they asked
 - qualify: ask ONE question to learn what their business needs (only if you do not know yet)
 - send_demo: show the example site of their kind of business (only when one is available and not yet sent); write {DEMO_TOKEN} where the link goes, never a URL yourself
-- handoff: a person must take over: they want to hire, start, meet or talk to someone; or the knowledge base does not cover the question; or it needs a decision. The reply is a statement, never a question, and never names a person. When they said they will get back to you (taking it to the owner, a partner, thinking it over), acknowledge that: you will wait for their answer and they can write here with any question; do not promise that someone will contact them. Otherwise say "nossa equipe" (our team) will talk to them right here in this chat
+- handoff: a person must take over: they want to hire, start, meet or talk to someone; or the knowledge base does not cover the question; or it needs a decision. The reply is a statement, never a question, and never names a person. Say "nossa equipe" (our team) will talk to them right here in this chat
+- defer: they said they will get back to you (taking it to the owner or a partner, thinking it over, "te aviso", "te dou uma resposta"), or they thank you after saying so. The reply is one short statement, never a question: you will wait for their answer and they can write here with any question; do not promise that someone will contact them. If they named when ("semana que vem", "até sexta"), put that wait in days in follow_up_days (1 to 7), else 0
 - wait: nothing needs an answer (a thanks, an "ok", an emoji)
 
 Rules for the reply:
@@ -101,7 +108,7 @@ Rules for the reply:
 - Refer to the company without any web address (no ".com" or ".me")
 
 Answer with ONLY this JSON:
-{{"action": "answer|qualify|send_demo|handoff|wait", "reply": "...", "confidence": "high|medium|low", "reason": "one short sentence", "industry": "their kind of business, only if they just said it, else empty", "sender": "person|automatic|unclear", "intent": "interested|objection|not_interested|unsubscribe|escalate|ooo|wrong_person|question"}}
+{{"action": "answer|qualify|send_demo|handoff|wait|defer", "reply": "...", "follow_up_days": 0, "confidence": "high|medium|low", "reason": "one short sentence", "industry": "their kind of business, only if they just said it, else empty", "sender": "person|automatic|unclear", "intent": "interested|objection|not_interested|unsubscribe|escalate|ooo|wrong_person|question"}}
 intent: what their last message is. "unsubscribe" when they ask to stop being contacted; "escalate" when angry or threatening; "ooo" for any automatic message; "not_interested" for a clear no
 sender: "automatic" when the last message is a business bot, menu, away or ordering message; "person" when someone typed it; "unclear" when you cannot tell
 {WHATSAPP_AUTO_NOTE}When it is automatic, sender is "automatic" and intent is "ooo".
@@ -531,7 +538,10 @@ class Handler:
                 intent=intent,
                 stage=convo.stage,
                 offered_slots=convo.offered_slots,
+                # They wrote: any nudge planned for their silence is moot.
+                follow_up_at="", follow_ups=0,
             )
+            convo.follow_up_at, convo.follow_ups = "", 0
         if convo.stage != old_stage:
             logger.info(f"Handler: Stage for {lead_email}: {old_stage} -> {convo.stage}")
             await notify.on_stage_change(self.state, self.config, prospect, convo, old_stage,
@@ -648,6 +658,8 @@ class Handler:
                 details={"prospect_phone": prospect.phone, "action": decision.action,
                          "confidence": decision.confidence, "reason": decision.reason,
                          "overridden": decision.overridden, "reply_preview": reply_text[:200]})
+            if decision.action == "defer":
+                await self._schedule_follow_up(prospect, convo, decision.follow_up_days)
             if decision.action == "handoff":
                 # The knowledge base ran out, or they want a person: put the
                 # chat on the dashboard's "needs you" list and stop answering.
@@ -986,6 +998,132 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
         await self.state.update_conversation(convo.id, status="needs_human")
         await notify.push_handoff(self.state, self.config, prospect, convo, reply_text, self.whatsapp)
 
+    # ── Follow-ups for a lead who said they'd get back ──
+
+    async def _schedule_follow_up(self, prospect, convo, days: int = 0, since=None,
+                                  sent: int = 0) -> str:
+        """Nudge them if they stay quiet: `days` they named (calendar days),
+        else FOLLOW_UP_BUSINESS_DAYS[sent] working days, always inside
+        business hours. Returns the time, naive UTC."""
+        start = since or datetime.now(timezone.utc)
+        if days:
+            at = start + timedelta(days=days)
+            at = closed_until(self.config, at) or at
+        else:
+            at = business_days_later(self.config, FOLLOW_UP_BUSINESS_DAYS[sent], start)
+        due = at.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+        await self.state.update_conversation(convo.id, follow_up_at=due, follow_ups=sent)
+        convo.follow_up_at, convo.follow_ups = due, sent
+        await self.state.log_action(
+            action_type="follow_up_scheduled", agent="handler",
+            details={"conversation_id": convo.id, "prospect_phone": prospect.phone,
+                     "follow_up_at": due, "attempt": sent + 1})
+        if not sent and since is None:     # live chat; a hand-back is the team's own doing
+            await notify.push(
+                self.state, self.config, "hot_lead", f"defer:{convo.id}:{due}",
+                f"Harvey: {prospect.company or prospect.phone} will get back to you. "
+                f"Harvey follows up {at.astimezone(pytz.timezone(self.config.usage.quiet_hours.timezone)):%d/%m %H:%M} if they stay quiet."
+                + notify.conversation_link(self.config, convo.id), self.whatsapp)
+        return due
+
+    async def reassess_whatsapp(self, convo: Conversation) -> dict:
+        """A chat the team handed back: what Harvey does next, from the whole
+        thread. {"next": "follow_up" | "reply" | "wait" | "handoff", ...}"""
+        prospect = await self.state.get_prospect(convo.prospect_id) if convo.prospect_id else None
+        if convo.channel != "whatsapp" or not convo.thread or not prospect or not prospect.phone \
+                or prospect.status == "opted_out":
+            return {"next": "wait"}
+        last = convo.thread[-1]
+        since = last.timestamp.replace(tzinfo=timezone.utc)
+        if last.sender != "prospect":
+            # The last word is ours: anything Harvey queued before it is stale,
+            # and they get a nudge if they stay quiet.
+            await self.state.cancel_pending_outbox_for_prospect(prospect.id, reason="replaced by follow-up")
+            return {"next": "follow_up", "follow_up_at": await self._due_from(prospect, convo, since)}
+        decision = await self._decide_whatsapp("", last.content, prospect, convo)
+        if decision.action == "defer":
+            return {"next": "follow_up",
+                    "follow_up_at": await self._due_from(prospect, convo, since, decision.follow_up_days)}
+        if decision.action == "handoff":
+            await self.state.update_conversation(convo.id, status="needs_human")
+            return {"next": "handoff", "reason": decision.overridden or decision.reason}
+        if decision.action == "wait" or not decision.reply:
+            return {"next": "wait"}
+        await self._queue_whatsapp_reply(decision.reply, prospect, convo, decision.intent, decision.action)
+        return {"next": "reply", "reply": decision.reply}
+
+    async def _due_from(self, prospect, convo, since, days: int = 0) -> str:
+        """A follow-up counted from `since`; one already overdue goes at the next open hour."""
+        due = await self._schedule_follow_up(prospect, convo, days, since=since)
+        now = datetime.now(timezone.utc)
+        if due < now.replace(tzinfo=None).isoformat():
+            at = closed_until(self.config, now) or now
+            due = at.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+            await self.state.update_conversation(convo.id, follow_up_at=due)
+        return due
+
+    async def follow_up_due(self) -> int:
+        """Write and queue the follow-ups that came due, in business hours.
+        After FOLLOW_UP_MAX unanswered ones the chat goes back to the team."""
+        if closed_until(self.config):
+            return 0
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        done = 0
+        for convo in await self.state.get_conversations_by_status("open"):
+            if convo.channel != "whatsapp" or not convo.follow_up_at or convo.follow_up_at > now:
+                continue
+            prospect = await self.state.get_prospect(convo.prospect_id)
+            if not prospect or not prospect.phone or prospect.status == "opted_out":
+                await self.state.update_conversation(convo.id, follow_up_at="")
+                continue
+            if convo.follow_ups >= FOLLOW_UP_MAX:
+                await self.state.update_conversation(convo.id, follow_up_at="")
+                await self._hand_over(prospect, convo, f"No answer after {FOLLOW_UP_MAX} follow-ups.")
+                await self.state.log_action(
+                    action_type="handoff", agent="handler",
+                    details={"prospect_phone": prospect.phone,
+                             "reason": f"no answer after {FOLLOW_UP_MAX} follow-ups"})
+                continue
+            text = await self._write_follow_up(prospect, convo)
+            if not text:
+                await self.state.update_conversation(convo.id, follow_up_at="")
+                await self._hand_over(prospect, convo, "Harvey could not write the follow-up.")
+                continue
+            await self._queue_whatsapp_reply(text, prospect, convo, "question", action="answer")
+            await self._schedule_follow_up(prospect, convo, sent=convo.follow_ups + 1)
+            done += 1
+        return done
+
+    async def _write_follow_up(self, prospect, convo) -> str:
+        """The nudge, written now from the whole chat; "" if none passes the gate."""
+        cfg = self.config.channels.whatsapp
+        history = "\n".join(
+            f"{'Theo' if m.sender == 'harvey' else 'Equipe' if m.sender == 'team' else 'Cliente'}: {m.content}"
+            for m in convo.thread[-10:])
+        last = ("This is the last follow-up: keep it light, say you remain available whenever it makes sense, no question (like: Oi! Passando só pra dizer que sigo por aqui quando fizer sentido retomar o site.)"
+                if convo.follow_ups else
+                "Pick up on the last thing discussed (what they said they would do, like asking the owner, or what was last sent) and ask one easy yes/no question about it (like: Oi! Conseguiu conversar com o proprietário sobre a landing page?).")
+        persona = self.config.persona
+        prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}, an automated virtual assistant chatting on WhatsApp. Tone: {persona.tone}. Write in {cfg.language}.
+
+The lead has not answered since the last message. Write ONE short follow-up message (at most 30 words, plain text, no greeting formula, no links, no prices, no emojis; start with "Oi!", never with "Tudo bem"). {last} Do not repeat earlier messages word for word.
+
+## Conversation
+{history}
+
+Write ONLY the message text."""
+        text = await self.brain.think(prompt, session_id="harvey-handler", agent="handler",
+                                      task="follow_up", **self._model_kw("whatsapp"))
+        if not text:
+            paused = getattr(self.brain, "paused_reason", "")
+            if paused:
+                raise BrainUnavailable(paused)
+            return ""
+        text = text.strip().strip('"')
+        gate = whatsapp_check(prospect.phone, text, prospect, kind="reply",
+                              allowed_prices=(), allowed_links=[])
+        return text if gate else ""
+
     async def _queue_whatsapp_reply(self, response: str, prospect, convo, intent: str,
                                     action: str = "", force_auto: bool = False):
         """Route Harvey's WhatsApp reply through the outbox. The approval
@@ -1306,6 +1444,7 @@ Write a reply that:"""
 - Makes it easy for them to refer (one-line ask)
 - Under 50 words"""
 
+        prompt += f"\n\nWrite it in {email_language(self.config)}."
         prompt += "\n\nWrite ONLY the email body. No subject line, no greeting label, no signature block, no markdown."
 
         response = await self.brain.think(

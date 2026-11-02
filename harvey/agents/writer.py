@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timezone
 
 from harvey.brain import Brain
-from harvey.config import HarveyConfig
+from harvey.config import HarveyConfig, email_language
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
 from harvey.models.campaign import SUBJECT_STYLES, Campaign, EmailStep, pick_subject
@@ -306,7 +306,7 @@ class Writer:
 
         prompt += f"""
 
-Write ONE cold email (the very first touch) to this specific person.
+Write ONE cold email (the very first touch) to this specific person, in {email_language(self.config)} (subjects too).
 
 FACTS — everything you know about them. Every claim about the prospect in
 your email must come from these facts. If a fact isn't listed here, you
@@ -390,7 +390,7 @@ Pricing: {self.config.product.pricing}"""
 
         prompt += f"""
 
-Write a 3-email cold outreach sequence for prospects like these:
+Write a 3-email cold outreach sequence, in {email_language(self.config)} (subjects too), for prospects like these:
 {prospect_summary}
 
 Requirements:

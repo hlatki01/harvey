@@ -155,43 +155,65 @@ def _outbox(db):
         conn.close()
 
 
-def test_handing_back_after_the_team_spoke_stages_a_later_follow_up(client, monkeypatch):
+def _convo(db):
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute("SELECT status, follow_up_at, follow_ups FROM conversations WHERE id='cw'").fetchone()
+    finally:
+        conn.close()
+
+
+def test_handing_back_after_the_team_spoke_plans_a_follow_up(client, monkeypatch):
     _wa_chat(client.db_path, "team")
-
-    async def think(self, prompt, **kw):
-        assert "Equipe: Segue o modelo" in prompt
-        return {"suggestions": ["Conseguiu ver o modelo?"]}
-
-    monkeypatch.setattr("harvey.brain.Brain.think_json", think)
+    monkeypatch.setattr("harvey.brain.Brain.think_json", lambda *a, **k: pytest.fail("no model call"))
     r = client.post("/api/conversations/cw/status", json={"status": "open"}).json()
-    assert r["success"] and r["follow_up_at"]
-    [new] = [row for row in _outbox(client.db_path) if row[0] != "old"]
-    assert new[2] == "Conseguiu ver o modelo?" and new[3] == r["follow_up_at"]
-    assert new[3] > datetime.utcnow().isoformat()        # later, not now
+    assert r["success"] and r["next"] == "follow_up" and r["follow_up_at"]
+    assert r["follow_up_at"] > datetime.utcnow().isoformat()     # later, not now
+    assert _convo(client.db_path) == ("open", r["follow_up_at"], 0)
     assert _outbox(client.db_path)[0][:2] == ("old", "cancelled")   # written before the team spoke
 
 
-def test_no_follow_up_when_their_message_is_the_last_one(client, monkeypatch):
+def test_a_lead_who_will_get_back_gets_a_follow_up_not_an_answer(client, monkeypatch):
     _wa_chat(client.db_path, "prospect")
-    monkeypatch.setattr("harvey.brain.Brain.think_json", lambda *a, **k: pytest.fail("no model call"))
+    _sql(client.db_path, "UPDATE prospects SET phone='5511999990000' WHERE id='w1'")
+
+    async def think(self, prompt, **kw):
+        assert "Cliente: Pode ser" in prompt
+        return {"action": "defer", "reply": "Combinado!", "confidence": "high", "intent": "interested"}
+    monkeypatch.setattr("harvey.brain.Brain.think_json", think)
     r = client.post("/api/conversations/cw/status", json={"status": "open"}).json()
-    assert r["success"] and r["follow_up_at"] is None
-    assert [row[0] for row in _outbox(client.db_path)] == ["old"]
+    assert r["next"] == "follow_up" and _convo(client.db_path)[1] == r["follow_up_at"]
+    assert [row[0] for row in _outbox(client.db_path)] == ["old"]      # nothing said now
+
+
+def test_a_question_left_open_is_answered_on_hand_back(client, monkeypatch):
+    _wa_chat(client.db_path, "prospect")
+    _sql(client.db_path, "UPDATE prospects SET phone='5511999990000' WHERE id='w1'")
+
+    async def think(self, prompt, **kw):
+        return {"action": "answer", "reply": "Sim, atendemos todo o Brasil.", "confidence": "high"}
+    monkeypatch.setattr("harvey.brain.Brain.think_json", think)
+    r = client.post("/api/conversations/cw/status", json={"status": "open"}).json()
+    assert r["next"] == "reply" and _convo(client.db_path)[1] == ""
+    assert "Sim, atendemos todo o Brasil." in [row[2] for row in _outbox(client.db_path)]
+
+
+def test_cancel_or_hurry_the_planned_follow_up(client):
+    _wa_chat(client.db_path, "team", status="open")
+    _sql(client.db_path, "UPDATE conversations SET follow_up_at='2030-01-01T12:00:00' WHERE id='cw'")
+    r = client.post("/api/conversations/cw/follow-up", json={"action": "now"}).json()
+    assert r["success"] and r["follow_up_at"] < "2030"
+    assert client.post("/api/conversations/cw/follow-up", json={"action": "cancel"}).json()["success"]
+    assert _convo(client.db_path)[1] == ""
+    assert client.post("/api/conversations/cw/follow-up", json={"action": "cancel"}).status_code == 409
 
 
 def test_closing_cancels_what_harvey_still_had_queued(client):
     _wa_chat(client.db_path, "team", status="open")
+    _sql(client.db_path, "UPDATE conversations SET follow_up_at='2030-01-01T12:00:00' WHERE id='cw'")
     assert client.post("/api/conversations/cw/status", json={"status": "closed"}).json()["success"]
     assert _outbox(client.db_path)[0][1] == "cancelled"
-
-
-def test_follow_up_lands_in_working_hours_a_day_later():
-    from types import SimpleNamespace
-    config = SimpleNamespace(usage=SimpleNamespace(quiet_hours=SimpleNamespace(timezone="America/Sao_Paulo")))
-    # 14:00 in São Paulo (17:00 UTC) -> the next day, same time.
-    assert dash._follow_up_time(config, datetime(2026, 10, 30, 17, 0, tzinfo=timezone.utc)) == "2026-10-31T17:00:00"
-    # 21:00 in São Paulo -> 10:00 two days later, never at night.
-    assert dash._follow_up_time(config, datetime(2026, 10, 31, 0, 0, tzinfo=timezone.utc)) == "2026-11-01T13:00:00"
+    assert _convo(client.db_path)[1] == ""
 
 
 def test_outbox_list_pages_and_searches_with_the_company(client):

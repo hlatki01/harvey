@@ -1381,3 +1381,67 @@ async def test_a_reply_never_waits_behind_a_backlog_of_openings(state):
     await _sender(state, client).send_replies()
     assert client.sent and client.sent[0][0] == "5511987654321"
     assert (await state.get_outbox_item(reply))["status"] == "sent"
+
+
+# ── A lead who said they'd get back ──
+
+@pytest.mark.asyncio
+async def test_a_lead_who_will_get_back_is_acknowledged_and_followed_up_later(state):
+    pid = await _contacted_prospect(state)
+    client = FakeEvolution()
+    client.inbound = [WhatsAppInbound("M1", "5511987654321", "Vou encaminhar pro proprietário, te dou uma resposta")]
+    handler = _handler(state, client, StubBrain(intent="interested", action="defer",
+                                                text="Combinado, fico no aguardo por aqui!"))
+    await handler.run_whatsapp()
+
+    [convo] = await state.get_conversations_by_status("open")          # stays with Harvey
+    [ack] = await state.get_outbox(channel="whatsapp")
+    assert ack["body"] == "Combinado, fico no aguardo por aqui!"
+    due = datetime.fromisoformat(convo.follow_up_at)
+    assert timedelta(days=1) < due - datetime.utcnow() <= timedelta(days=5)    # two working days, at opening
+    assert convo.follow_ups == 0
+
+    # Their next message cancels the plan.
+    client.inbound = [WhatsAppInbound("M2", "5511987654321", "Ele gostou, quanto tempo leva?")]
+    handler.brain = StubBrain(intent="question", text="Umas duas semanas.")
+    await handler.run_whatsapp()
+    [convo] = await state.get_conversations_by_status("open")
+    assert convo.follow_up_at == ""
+
+
+@pytest.mark.asyncio
+async def test_due_follow_ups_are_written_then_the_chat_returns_to_the_team(state):
+    await _contacted_prospect(state)
+    client = FakeEvolution()
+    client.inbound = [WhatsAppInbound("M1", "5511987654321", "Vou ver com meu sócio")]
+    handler = _handler(state, client, StubBrain(intent="interested", action="defer", text="Combinado!"))
+    await handler.run_whatsapp()
+    [convo] = await state.get_conversations_by_status("open")
+
+    handler.brain = StubBrain(text="Conseguiu falar com seu sócio?")
+    assert await handler.follow_up_due() == 0                          # not due yet
+    for attempt in (1, 2):
+        await state.update_conversation(convo.id, follow_up_at="2020-01-01T00:00:00")
+        assert await handler.follow_up_due() == 1
+        [convo] = await state.get_conversations_by_status("open")
+        assert convo.follow_ups == attempt and convo.follow_up_at > "2020"
+    bodies = [i["body"] for i in await state.get_outbox(channel="whatsapp")]
+    assert bodies.count("Conseguiu falar com seu sócio?") == 2
+
+    await state.update_conversation(convo.id, follow_up_at="2020-01-01T00:00:00")
+    assert await handler.follow_up_due() == 0
+    [back] = await state.get_conversations_by_status("needs_human")     # two unanswered: the team decides
+    assert back.id == convo.id and back.follow_up_at == ""
+
+
+def test_business_days_skip_weekends_and_holidays():
+    from types import SimpleNamespace
+    from harvey.config import business_days_later
+    from datetime import timezone as tz
+    config = SimpleNamespace(usage=SimpleNamespace(
+        business_hours={"mon": "09:00-18:00", "tue": "09:00-18:00", "wed": "09:00-18:00",
+                        "thu": "09:00-18:00", "fri": "09:00-18:00", "sat": "09:00-13:00"},
+        holidays_country="BR", quiet_hours=SimpleNamespace(timezone="America/Sao_Paulo")))
+    # Fri 30 Oct 2026, afternoon: Sat 31 is open, Sun closed, Mon 2 Nov is Finados.
+    at = business_days_later(config, 2, datetime(2026, 10, 30, 18, 0, tzinfo=tz.utc))
+    assert at.strftime("%Y-%m-%d %H:%M") == "2026-11-03 09:00"

@@ -16,6 +16,8 @@ export interface Convo {
   thread?: ThreadMsg[]
   emails?: SentEmail[]
   draft?: Draft | null
+  follow_up_at?: string     // naive UTC: Harvey nudges them then if they stay quiet
+  follow_ups?: number
 }
 
 export interface ChatMedia { kind: string; filename?: string }

@@ -40,6 +40,8 @@ class Conversation(BaseModel):
     stage: str = "initial_outreach"  # sales pipeline stage
     status: str = "open"  # open/replied/meeting_booked/closed
     offered_slots: str = ""  # JSON [{"start","end"}] of meeting times we offered
+    follow_up_at: str = ""  # naive UTC ISO: when Harvey nudges a lead who said they'd get back
+    follow_ups: int = 0     # nudges already sent for that wait
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 

@@ -10,6 +10,8 @@ Actions
   qualify    one question to learn what the business needs
   send_demo  show the example site for the lead's kind of business
   handoff    a person must take over (the reply says "nossa equipe")
+  defer      they will get back (asking the owner, thinking it over): a short
+             acknowledgement now, and a follow-up later if they stay quiet
   wait       nothing to answer (a thanks, an "ok")
 
 The model writes ``{demo_url}`` where the example link goes; the code swaps
@@ -25,7 +27,7 @@ from harvey.gate import whatsapp_check
 logger = logging.getLogger("harvey.decide")
 
 INTENTS = ("interested", "objection", "not_interested", "unsubscribe", "escalate", "ooo", "wrong_person", "question")
-ACTIONS = ("answer", "qualify", "send_demo", "handoff", "wait")
+ACTIONS = ("answer", "qualify", "send_demo", "handoff", "wait", "defer")
 DEMO_TOKEN = "{demo_url}"
 SLOTS_TOKEN = "{slots}"     # where the free meeting times go (integrations/calendar.py)
 HANDOFF_REPLY = "Combinado! Nossa equipe vai falar com você por aqui mesmo, é só aguardar."
@@ -54,6 +56,7 @@ class Decision:
     overridden: str = ""          # why the policy changed the model's proposal
     sender: str = "person"        # person | automatic | unclear: who wrote the last message
     intent: str = "question"      # what the last message is, as the classifier used to say
+    follow_up_days: int = 0       # defer: the wait they named, in days (0: the usual)
 
 
 def find_demo(category: str, demos):
@@ -79,7 +82,16 @@ def parse_decision(raw) -> Decision | None:
         reply=str(raw.get("reply") or "").strip(),
         confidence=confidence if confidence in ("high", "medium", "low") else "medium",
         reason=str(raw.get("reason") or "").strip(),
+        follow_up_days=_days(raw.get("follow_up_days")),
     )
+
+
+def _days(value) -> int:
+    """A wait the lead named, kept to a week; 0 when there is none."""
+    try:
+        return max(0, min(7, int(value)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def needs_review(decision: Decision | None) -> bool:
@@ -150,7 +162,7 @@ def apply_policy(decision: Decision | None, *, prospect, reply_text: str, demo, 
         return _handoff(decision, "gate: " + "; ".join(gate.reasons)[:200])
 
     # Offering meeting times is the answer to "vamos marcar", not a hand-over.
-    if (decision.action != "handoff" and not offers_times
+    if (decision.action not in ("handoff", "defer") and not offers_times
             and wants_a_human(reply_text, assistant_turns, flat)):
 
         decision.action = "handoff"

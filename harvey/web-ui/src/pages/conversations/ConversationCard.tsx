@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, ArrowRight, Info, Mail, PenLine } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Clock, Info, Mail, PenLine } from 'lucide-react'
 import { api, JSON_HEADERS } from '@/lib/api'
-import { failMsg, own, parseTs, relTime } from '@/lib/format'
+import { failMsg, formatDate, own, parseTs, relTime } from '@/lib/format'
 import { useNav } from '@/app/nav'
 import { useToast } from '@/components/toast'
 import { Button } from '@/components/ui/button'
@@ -95,7 +95,9 @@ function WhatsAppThread({ c, chat }: { c: Convo; chat: ReturnType<typeof useChat
 
 // Harvey answers new replies only on open conversations: an escalated one
 // waits for you to reply yourself, then close it or hand it back.
-function Actions({ c, onStatus, busy }: { c: Convo; onStatus: (s: 'open' | 'closed') => void; busy: '' | 'open' | 'closed' }) {
+function Actions({ c, onStatus, onFollowUp, busy }: {
+  c: Convo; onStatus: (s: 'open' | 'closed') => void; onFollowUp: (a: 'now' | 'cancel') => void; busy: string
+}) {
   const wrap = 'mt-4 flex flex-none flex-wrap items-center gap-2 border-t border-line pt-3'
   if (c.status === 'needs_human') {
     return (
@@ -109,7 +111,23 @@ function Actions({ c, onStatus, busy }: { c: Convo; onStatus: (s: 'open' | 'clos
       </div>
     )
   }
-  if (c.status === 'open') return <div className={wrap}><Button size="sm" variant="ghost" className="ml-auto" disabled={!!busy} onClick={() => onStatus('closed')}>Close conversation</Button></div>
+  if (c.status === 'open') {
+    return (
+      <div className={wrap}>
+        {c.follow_up_at && (
+          <>
+            <span className="mr-auto inline-flex items-center gap-1.5 text-[12px] text-text-2">
+              <Clock className="size-3.5" aria-hidden />
+              Next step: {c.follow_ups ? 'last follow-up' : 'follow-up'} {formatDate(c.follow_up_at)}, if they stay quiet
+            </span>
+            <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => onFollowUp('now')}>Send now</Button>
+            <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => onFollowUp('cancel')}>Cancel follow-up</Button>
+          </>
+        )}
+        <Button size="sm" variant="ghost" className={c.follow_up_at ? '' : 'ml-auto'} disabled={!!busy} onClick={() => onStatus('closed')}>Close conversation</Button>
+      </div>
+    )
+  }
   if (c.status === 'closed') return <div className={wrap}><Button size="sm" variant="ghost" className="ml-auto" disabled={!!busy} onClick={() => onStatus('open')}>Reopen</Button></div>
   return null
 }
@@ -117,22 +135,36 @@ function Actions({ c, onStatus, busy }: { c: Convo; onStatus: (s: 'open' | 'clos
 export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => void }) {
   const toast = useToast()
   const [lead, setLead] = useState(false)
-  const [busy, setBusy] = useState<'' | 'open' | 'closed'>('')
+  const [busy, setBusy] = useState<'' | 'open' | 'closed' | 'follow-up'>('')
   const wa = c.channel === 'whatsapp'
   const chat = useChat(c.id, wa)
   const name = convoName(c)
   const stage = own(STAGE_LABELS, c.stage || '')
 
-  // Handing back can take a few seconds: Harvey writes the follow-up it will send if they stay quiet.
+  async function followUp(action: 'now' | 'cancel') {
+    if (busy) return
+    setBusy('follow-up')
+    const data = await api<{ success?: boolean; message?: string }>('/api/conversations/' + encodeURIComponent(c.id) + '/follow-up', {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ action }),
+    })
+    setBusy('')
+    if (data && data.success) toast(action === 'cancel' ? 'Follow-up cancelled.' : 'Harvey writes and sends it on its next cycle in business hours.', 'success')
+    else toast(failMsg(data, 'Could not change the follow-up.'), 'error')
+    onChanged()
+  }
+
+  // Handing back can take a few seconds: Harvey reads the chat and decides what comes next.
   async function setStatus(status: 'open' | 'closed') {
     if (busy) return
     setBusy(status)
-    const data = await api<{ success?: boolean; follow_up_at?: string | null }>('/api/conversations/' + encodeURIComponent(c.id) + '/status', {
+    const data = await api<{ success?: boolean; follow_up_at?: string | null; next?: string; reason?: string }>('/api/conversations/' + encodeURIComponent(c.id) + '/status', {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ status }),
     })
     setBusy('')
-    const when = data?.follow_up_at ? new Date(data.follow_up_at + 'Z').toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : ''
+    const when = data?.follow_up_at ? formatDate(data.follow_up_at) : ''
     if (data && data.success) toast(status === 'closed' ? 'Closed. A new reply starts a new conversation.'
+      : data.next === 'reply' ? 'Back with Harvey. It answered what was left open: the reply is in the Outbox or on its way.'
+      : data.next === 'handoff' ? `Harvey thinks this one is still yours${data.reason ? ` (${data.reason})` : ''}.`
       : when ? `Back with Harvey. If they stay quiet, a follow-up goes out ${when}.` : 'Open again. Harvey will answer the next reply.', 'success')
     else toast(failMsg(data, 'Could not update that conversation.'), 'error')
     onChanged()
@@ -158,7 +190,7 @@ export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => 
       </div>
       {wa ? <WhatsAppThread c={c} chat={chat} /> : <EmailThread c={c} />}
       {wa && ['needs_human', 'open'].includes(c.status) && <Composer id={c.id} chat={chat} />}
-      <Actions c={c} onStatus={setStatus} busy={busy} />
+      <Actions c={c} onStatus={setStatus} onFollowUp={followUp} busy={busy} />
       {lead && <LeadModal id={c.id} name={[c.first_name, c.last_name].filter(Boolean).join(' ') || 'Lead'} onClose={() => setLead(false)} />}
     </div>
   )

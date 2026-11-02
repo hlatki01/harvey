@@ -1,4 +1,5 @@
-import { initials, relTime, statusMeta } from '@/lib/format'
+import { Clock } from 'lucide-react'
+import { formatDate, initials, relTime, statusMeta } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { convoName, type Convo } from './types'
@@ -30,6 +31,7 @@ function Item({ c, selected, onSelect }: { c: Convo; selected: boolean; onSelect
         </span>
         <span className="truncate text-[12px] text-text-3">{snippet || c.company || ''}</span>
       </span>
+      {c.status === 'open' && c.follow_up_at && <Clock className="size-3.5 flex-none text-text-3" aria-label={'Follow-up ' + formatDate(c.follow_up_at)} />}
       <span className={cn('size-2 flex-none rounded-full', dot)} title={statusMeta(c.intent === 'ooo' && c.status === 'open' ? 'ooo' : c.status).label} />
     </button>
   )

@@ -1988,7 +1988,8 @@ async def conversation_send(convo_id: str, request: Request):
     state = _state()
     convo = await state.get_conversation(convo_id)
     convo.thread.append(Message(sender="team", content=text))
-    await state.update_conversation(convo_id, thread_json=convo.thread_json(), status="needs_human")
+    await state.update_conversation(convo_id, thread_json=convo.thread_json(), status="needs_human",
+                                    follow_up_at="")
     await _team_took_over(state, convo.prospect_id)
     await state.log_action("whatsapp_sent", "dashboard", {
         "to": row["phone"], "kind": "team", "message_id": result.message_id})
@@ -2282,7 +2283,7 @@ async def conversation_attach(convo_id: str, request: Request):
         return JSONResponse({"success": False, "message": f"WhatsApp did not send it: {result.error}"},
                             status_code=502)
     state = _state()
-    await state.update_conversation(convo_id, status="needs_human")
+    await state.update_conversation(convo_id, status="needs_human", follow_up_at="")
     convo = await state.get_conversation(convo_id)
     await _team_took_over(state, convo.prospect_id if convo else "")
     await state.log_action("whatsapp_sent", "dashboard", {
@@ -2312,14 +2313,38 @@ async def set_conversation_status(convo_id: str, request: Request):
     await state.update_conversation(convo_id, status=status)
     await state.log_action("conversation_status", "dashboard",
                            {"conversation_id": convo_id, "from": rows[0]["status"], "to": status})
-    follow_up_at = None
+    result = {}
     if status == "closed":
         convo = await state.get_conversation(convo_id)
+        await state.update_conversation(convo_id, follow_up_at="")
         if convo and convo.prospect_id:
             await state.cancel_pending_outbox_for_prospect(convo.prospect_id, reason="conversation closed")
     elif rows[0]["status"] == "needs_human":
-        follow_up_at = await _stage_hand_back_follow_up(state, convo_id)
-    return {"success": True, "status": status, "follow_up_at": follow_up_at}
+        result = await _reassess(state, convo_id)
+    return {"success": True, "status": status, "follow_up_at": result.get("follow_up_at"), **result}
+
+
+@app.post("/api/conversations/{convo_id}/follow-up")
+async def set_conversation_follow_up(convo_id: str, request: Request):
+    """The follow-up Harvey planned: {"action": "cancel"} drops it, "now"
+    makes it due, so the next cycle in business hours writes and sends it."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    action = data.get("action") if isinstance(data, dict) else None
+    if action not in ("cancel", "now"):
+        return _refuse("action must be cancel or now", 400)
+    rows = await query_db("SELECT follow_up_at FROM conversations WHERE id = ?", (convo_id,))
+    if not rows:
+        return _refuse("No such conversation.", 404)
+    if not rows[0]["follow_up_at"]:
+        return _refuse("No follow-up is planned for this conversation.")
+    due = "" if action == "cancel" else datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    state = _state()
+    await state.update_conversation(convo_id, follow_up_at=due)
+    await state.log_action("follow_up_" + action, "dashboard", {"conversation_id": convo_id})
+    return {"success": True, "follow_up_at": due}
 
 
 async def _team_took_over(state, prospect_id: str):
@@ -2329,57 +2354,22 @@ async def _team_took_over(state, prospect_id: str):
         await state.cancel_pending_outbox_for_prospect(prospect_id, reason="team answered")
 
 
-HAND_BACK_FOLLOW_UP_DAYS = 1
-
-
-def _follow_up_time(config, now=None) -> str:
-    """About a day later, inside working hours (10:00-18:00 where the quiet
-    hours are set), as naive UTC like every send_at."""
-    import pytz
-    tz = pytz.timezone(config.usage.quiet_hours.timezone)
-    at = (now or datetime.now(timezone.utc)).astimezone(tz) + timedelta(days=HAND_BACK_FOLLOW_UP_DAYS)
-    if at.hour < 10:
-        at = at.replace(hour=10, minute=0)
-    elif at.hour >= 18:
-        at = (at + timedelta(days=1)).replace(hour=10, minute=0)
-    return at.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
-
-
-async def _stage_hand_back_follow_up(state, convo_id: str) -> str | None:
-    """Handed back to Harvey with the last word ours (the team's, usually):
-    if they stay quiet, a nudge goes out later. Their answer cancels it
-    (stop-on-reply), and so does the team writing again or closing the chat.
-    Returns when it is due, or None when nothing was staged."""
-    from harvey.config import load_config
+async def _reassess(state, convo_id: str) -> dict:
+    """Handed back to Harvey: it reads the chat and answers what was left
+    unanswered, plans a follow-up for a lead who will get back (or after the
+    team's last word), waits, or hands it back (agents/handler.py)."""
+    from harvey.agents.handler import Handler
+    from harvey.brain import Brain
+    from harvey.config import load_config, load_env
     convo = await state.get_conversation(convo_id)
-    if (not convo or convo.channel != "whatsapp" or not convo.thread
-            or convo.thread[-1].sender not in ("team", "harvey") or not convo.prospect_id):
-        return None
-    prospect = await state.get_prospect(convo.prospect_id)
-    if not prospect or not prospect.phone or prospect.status == "opted_out":
-        return None
-    ideas = await _chat_ideas(
-        convo_id,
-        "They have not answered the last message yet. Write ONE short, friendly follow-up to send "
-        "tomorrow if they stay quiet: pick up on what was last said, don't repeat it word for word, "
-        "and make it easy to answer. "
-        'JSON: {"suggestions": ["the follow-up"]}',
-        "hand_back_follow_up")
-    if not ideas:
-        return None
+    if not convo:
+        return {}
     config = load_config()
-    wa = config.channels.whatsapp
-    auto = not wa.require_approval or wa.auto_approve_replies or "answer" in wa.auto_approve_actions
-    send_at = _follow_up_time(config)
-    # Anything still queued was written before the last word: the follow-up replaces it.
-    await state.cancel_pending_outbox_for_prospect(prospect.id, reason="replaced by follow-up")
-    await state.add_outbox_item(
-        prospect_id=prospect.id, conversation_id=convo_id, kind="reply",
-        to_email=prospect.phone, subject="WhatsApp", body=ideas[0], send_at=send_at,
-        status="approved" if auto else "pending_review", provider="evolution", channel="whatsapp")
-    await state.log_action("follow_up_staged", "dashboard",
-                           {"conversation_id": convo_id, "send_at": send_at})
-    return send_at
+    try:
+        return await Handler(Brain(state, config.brain), state, config, load_env()).reassess_whatsapp(convo)
+    except Exception as e:     # the hand-back itself stands; the next reply is answered as usual
+        logger.warning(f"Hand-back reassessment failed: {e}")
+        return {"next": "wait"}
 
 
 @app.get("/api/trend")

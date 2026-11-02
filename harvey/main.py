@@ -410,6 +410,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 tasks.append(("read_replies", handler.run()))
             if whatsapp.is_active:
                 tasks.append(("read_whatsapp", handler.run_whatsapp()))
+                tasks.append(("whatsapp_follow_ups", handler.follow_up_due()))
                 send_tasks.append(("send_whatsapp", whatsapp.run))
 
             # Profiling rides along every cycle. It is three HTTP requests per

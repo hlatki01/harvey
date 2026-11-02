@@ -158,6 +158,8 @@ class EmailChannelConfig(BaseModel):
     # SMTP+IMAP mailbox: AgentMail, Fastmail, ...)
     provider: str = "instantly"
     max_daily_sends: int = 50
+    # What every email Harvey writes is in: cold sequences, subjects, replies.
+    language: str = "English"
     # Mail sent to persona.email by someone Harvey never contacted becomes a
     # lead and gets a (reviewed) reply. Automated senders are ignored.
     inbound_leads: bool = False
@@ -389,7 +391,9 @@ OPT_OUT_WORDS = ("no thanks", "no thank you", "unsubscribe", "stop", "remove me"
                  "opt out")
 _ASKS_FOR_OPT_OUT_RE = re.compile(
     r"\breply(?:\s+with)?\s*[\"'\u201c\u2018]?\s*(?:"
-    + "|".join(re.escape(w) for w in OPT_OUT_WORDS) + r")\b", re.IGNORECASE)
+    + "|".join(re.escape(w) for w in OPT_OUT_WORDS) + r")\b"
+    # Portuguese: 'Responda "sair"' (agents/handler.py honours a bare "sair").
+    r"|\bresponda(?:\s+com)?\s*[\"'“‘]?\s*(?:sair|descadastrar)\b", re.IGNORECASE)
 
 
 class ComplianceConfig(BaseModel):
@@ -422,10 +426,16 @@ class ComplianceConfig(BaseModel):
         if not _ASKS_FOR_OPT_OUT_RE.search(v):
             raise ValueError(
                 "opt_out_line must ask for a reply Harvey recognises as an opt-out, "
-                'e.g. Reply "no thanks" / Reply STOP. Recognised: '
+                'e.g. Reply "no thanks" / Reply STOP / Responda "sair". Recognised: '
                 + ", ".join(f'"{w}"' for w in OPT_OUT_WORDS) + "."
             )
         return v
+
+
+def email_language(config) -> str:
+    """What Harvey writes email in (channels.email.language)."""
+    email = getattr(getattr(config, "channels", None), "email", None)
+    return getattr(email, "language", "") or "English"
 
 
 def compliance_of(config) -> ComplianceConfig:
@@ -573,6 +583,27 @@ def closed_until(config, now: _datetime | None = None) -> _datetime | None:
         if opens > now:
             return opens
     return None
+
+
+def business_days_later(config, days: int, start: _datetime | None = None) -> _datetime:
+    """When the `days`-th open day after `start` opens (aware). Without
+    business hours set, an open day is Monday to Friday from 10:00."""
+    import pytz
+    usage = getattr(config, "usage", None)
+    hours = getattr(usage, "business_hours", None) or {d: "10:00-18:00" for d in WEEKDAYS[:5]}
+    tz = pytz.timezone(getattr(getattr(usage, "quiet_hours", None), "timezone", "UTC"))
+    local = (start or _datetime.now(_timezone.utc)).astimezone(tz)
+    left, day = max(1, days), local.date()
+    for _ in range(366):
+        day += _timedelta(days=1)
+        span = hours.get(WEEKDAYS[day.weekday()])
+        if not span or day in _national_holidays(getattr(usage, "holidays_country", "")):
+            continue
+        left -= 1
+        if not left:
+            opens = _time.fromisoformat(_SPAN_RE.fullmatch(span.strip()).group(1))
+            return tz.localize(_datetime.combine(day, opens))
+    return local + _timedelta(days=days)
 
 
 BRAIN_PROVIDERS = ("claude", "codex")

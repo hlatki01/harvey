@@ -523,6 +523,11 @@ MIGRATIONS: list[str] = [
         removed_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     """,
+    # ── v20: a WhatsApp follow-up due when a lead said they'd get back (agents/handler.py) ──
+    """
+    ALTER TABLE conversations ADD COLUMN follow_up_at TEXT NOT NULL DEFAULT '';
+    ALTER TABLE conversations ADD COLUMN follow_ups INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -549,6 +554,7 @@ _CAMPAIGN_COLUMNS = frozenset({
 _CONVERSATION_COLUMNS = frozenset({
     "prospect_id", "campaign_id", "channel",
     "thread_json", "intent", "stage", "status", "offered_slots",
+    "follow_up_at", "follow_ups",
 })
 
 

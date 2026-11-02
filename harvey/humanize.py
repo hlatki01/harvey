@@ -108,6 +108,7 @@ Apply the Humanizer instructions above to the cold-email draft below. It is
 a short plain-text business email, so return email text only.
 
 Hard limits on the rewrite, on top of the instructions above:
+- Keep the draft's language: never translate it.
 - Keep every merge variable such as {{{{first_name}}}} or {{{{company}}}} exactly as written.
 - Add no fact, name, number or claim that is not already in the draft.
 - No em dashes, no bullets, no bold, no exclamation marks.
