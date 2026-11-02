@@ -85,3 +85,7 @@ def test_a_company_with_history_is_not_deleted(db):
     r = db.delete("/api/companies/c03")
     assert r.status_code == 409 and "history" in r.json()["message"]
     assert _sql(db.db_path, "SELECT COUNT(*) FROM companies WHERE id='c03'") == [(1,)]
+
+
+def test_industries_are_the_ones_on_file_most_common_first(db):
+    assert db.get("/api/companies/industries").json() == [{"name": "Pet store", "n": 29}, {"name": "Dentist", "n": 1}]

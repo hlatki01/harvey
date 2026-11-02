@@ -641,6 +641,14 @@ async def get_companies(q: str = "", page: int = 1, sort: str = "created_at", di
     return {"rows": rows, "total": total, "page": page, "per_page": COMPANIES_PAGE}
 
 
+@app.get("/api/companies/industries")
+async def company_industries():
+    """The kinds of business already on file, most common first: the choices
+    when a company is edited."""
+    return await query_db("SELECT industry AS name, COUNT(*) AS n FROM companies "
+                          "WHERE industry != '' GROUP BY industry ORDER BY n DESC, industry LIMIT 300")
+
+
 @app.patch("/api/companies/{company_id}")
 async def edit_company(company_id: str, request: Request):
     """Fix what a listing got wrong: name, industry, place, phone, website."""
