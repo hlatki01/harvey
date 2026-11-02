@@ -1,7 +1,7 @@
 import { Suspense, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, BarChart3, Building2, HelpCircle, Home, Inbox, MessageSquare, Power, Radio,
+  Activity, BarChart3, Building2, HelpCircle, Home, Inbox, LayoutGrid, MessageSquare, Power, Radio,
   RefreshCw, Search, Send, SlidersHorizontal, Users,
 } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -33,6 +33,7 @@ const GROUPS: { label: string; items: Item[] }[] = [
     { id: 'companies', label: 'Companies', icon: Building2 },
     { id: 'prospects', label: 'Contacts', icon: Users },
     { id: 'campaigns', label: 'Campaigns', icon: Send },
+    { id: 'categories', label: 'Categories', icon: LayoutGrid },
   ] },
   { label: 'System', items: [
     { id: 'activity', label: 'Activity', icon: Activity },

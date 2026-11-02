@@ -27,7 +27,7 @@ function CitiesForm({ initial, reload }: { initial: City[]; reload: () => Promis
     const cities = rows.filter(r => r.name.trim())
     if (!cities.length) return toast('Keep at least one city.', 'error')
     const r = await post<{ success?: boolean; message?: string; harvey_running?: boolean }>('/api/settings/geography', { cities })
-    if (r && r.success) toast(r.harvey_running ? 'Cities saved. Restart Harvey to use them in the heartbeat.' : 'Cities saved.', 'success')
+    if (r && r.success) toast('Cities saved. Harvey uses them from its next cycle.', 'success')
     else toast((r && r.message) || 'Save failed — is the dashboard still running?', 'error')
     await reload()
   }

@@ -67,3 +67,25 @@ def test_outbox_rows_say_when_business_hours_let_them_go(monkeypatch):
     assert "sends_from" not in rows[1]
     assert rows[2]["sends_from"] == "2026-11-09T12:00:00"
     assert "sends_from" not in rows[3]
+
+
+def test_dashboard_settings_reach_the_running_loop(monkeypatch):
+    import harvey.main as main
+    from harvey.config import DemoConfig, load_config
+    live = load_config()
+    wa_cfg = live.channels.whatsapp                 # what WhatsAppSender holds on to
+    fresh = load_config()
+    fresh.usage.business_hours = {"mon": "10:00-12:00"}
+    fresh.channels.whatsapp.demos = [DemoConfig(label="Pet", url="https://x.test", keywords=["pet"])]
+    fresh.channels.whatsapp.max_daily_sends = 999   # not a dashboard setting: left alone
+    monkeypatch.setattr(main, "load_config", lambda: fresh)
+    before = wa_cfg.max_daily_sends
+    main.refresh_dashboard_settings(live)
+    assert live.usage.business_hours == {"mon": "10:00-12:00"}
+    assert [d.label for d in wa_cfg.demos] == ["Pet"] and wa_cfg.max_daily_sends == before
+
+    def broken():
+        raise ValueError("bad yaml")
+    monkeypatch.setattr(main, "load_config", broken)
+    main.refresh_dashboard_settings(live)           # keeps going with what it had
+    assert live.usage.business_hours == {"mon": "10:00-12:00"}

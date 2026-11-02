@@ -48,6 +48,29 @@ QUIET_HOURS_POLL_SECONDS = 300
 REPLY_READERS = ("read_replies", "read_whatsapp")
 
 
+# What the dashboard edits in the config file. Re-read every cycle so a change
+# there counts from the next one, set on the live config in place: agents keep
+# references to its parts (WhatsAppSender.cfg is config.channels.whatsapp).
+DASHBOARD_SETTINGS = (
+    ("usage", "business_hours"), ("usage", "holidays_country"),
+    ("icp", "geography"), ("icp", "geo_coordinates"),
+    ("channels", "whatsapp", "demos"),
+)
+
+
+def refresh_dashboard_settings(config: HarveyConfig) -> None:
+    try:
+        fresh = load_config()
+    except Exception as e:
+        logger.warning(f"Couldn't re-read the config; keeping the settings in use: {e}")
+        return
+    for *parents, name in DASHBOARD_SETTINGS:
+        live, new = config, fresh
+        for part in parents:
+            live, new = getattr(live, part), getattr(new, part)
+        setattr(live, name, getattr(new, name))
+
+
 def in_quiet_hours(config: HarveyConfig) -> bool:
     """Check if we're currently in quiet hours."""
     qh = config.usage.quiet_hours
@@ -298,6 +321,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
     while not stop_event.is_set():
         try:
+            refresh_dashboard_settings(config)
             # 1. Check quiet hours
             if in_quiet_hours(config):
                 sleep_for = seconds_until_quiet_hours_end(config)

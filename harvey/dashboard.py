@@ -446,28 +446,32 @@ async def save_env_settings(request: Request):
 _COORD_RE = re.compile(r"-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?(,\d{1,4})?")
 
 
-def _replace_section_key(lines: list[str], section: str, key: str, block: list[str]) -> list[str]:
-    """Swap `<section>.<key>` (the line and its indented body) for `block`,
-    leaving every other line, comments included, as it was. Appended to the
-    section when the key isn't there yet."""
-    icp = next((i for i, l in enumerate(lines) if re.match(rf"{section}:\s*(#.*)?$", l)), None)
-    if icp is None:
-        raise ValueError(f"no {section}: section in the config file")
-    end = next((i for i in range(icp + 1, len(lines))
-                if lines[i].strip() and not lines[i][0].isspace()), len(lines))
-    start = next((i for i in range(icp + 1, end)
-                  if re.match(rf"\s{{2}}{key}:", lines[i])), None)
-    if start is None:
-        while end > icp + 1 and not lines[end - 1].strip():
-            end -= 1
-        return lines[:end] + block + lines[end:]
-    stop = start + 1
-    # The body is everything indented deeper than the key (blank lines inside it too).
-    while stop < end and (not lines[stop].strip() or re.match(r"\s{3,}", lines[stop])):
-        stop += 1
-    while stop > start + 1 and not lines[stop - 1].strip():
-        stop -= 1
-    return lines[:start] + block + lines[stop:]
+def _replace_config_key(lines: list[str], path: list[str], block: list[str]) -> list[str]:
+    """Swap the key at `path` (["icp", "geography"], or deeper) and its indented
+    body for `block`, leaving every other line, comments included, as it was.
+    Appended to its parent when the key isn't there yet. Two-space indents."""
+    lo, hi = 0, len(lines)
+    for depth, name in enumerate(path):
+        pad = " " * (2 * depth)
+        at = next((i for i in range(lo, hi)
+                   if re.match(rf"{pad}{re.escape(name)}:(\s|$)", lines[i])), None)
+        last = depth == len(path) - 1
+        if at is None:
+            if not last:
+                raise ValueError(f"no {'.'.join(path[:depth + 1])}: section in the config file")
+            while hi > lo and not lines[hi - 1].strip():
+                hi -= 1
+            return lines[:hi] + block + lines[hi:]
+        # The body is everything indented deeper than the key (blank lines inside it too).
+        stop = at + 1
+        while stop < hi and (not lines[stop].strip() or lines[stop].startswith(pad + " ")):
+            stop += 1
+        while stop > at + 1 and not lines[stop - 1].strip():
+            stop -= 1
+        if last:
+            return lines[:at] + block + lines[stop:]
+        lo, hi = at + 1, stop
+    return lines
 
 
 @app.get("/api/settings/geography")
@@ -509,10 +513,10 @@ async def save_geography(request: Request):
     q = json.dumps  # a JSON string is a valid double-quoted YAML scalar
     lines = read_user_text(path).split("\n")
     try:
-        lines = _replace_section_key(lines, "icp", "geography", ["  geography:"] + [f"    - {q(n, ensure_ascii=False)}" for n in names])
-        lines = _replace_section_key(lines, "icp", "geo_coordinates",
-                                     ["  geo_coordinates:"] + [f"    {q(n, ensure_ascii=False)}: {q(c)}" for n, c in coords.items()]
-                                     if coords else ["  geo_coordinates: {}"])
+        lines = _replace_config_key(lines, ["icp", "geography"], ["  geography:"] + [f"    - {q(n, ensure_ascii=False)}" for n in names])
+        lines = _replace_config_key(lines, ["icp", "geo_coordinates"],
+                                    ["  geo_coordinates:"] + [f"    {q(n, ensure_ascii=False)}: {q(c)}" for n, c in coords.items()]
+                                    if coords else ["  geo_coordinates: {}"])
     except ValueError as e:
         return _refuse(str(e))
     return _write_config_lines(path, lines) or {
@@ -573,10 +577,72 @@ async def save_business_hours(request: Request):
     path = _resolve_config_file()
     lines = read_user_text(path).split("\n")
     try:
-        lines = _replace_section_key(lines, "usage", "business_hours", ["  business_hours:"] + [
+        lines = _replace_config_key(lines, ["usage", "business_hours"], ["  business_hours:"] + [
             f"    {d}: {json.dumps(span)}" for d, span in open_days.items()])
-        lines = _replace_section_key(lines, "usage", "holidays_country",
-                                     [f"  holidays_country: {json.dumps(country.strip().upper())}"])
+        lines = _replace_config_key(lines, ["usage", "holidays_country"],
+                                    [f"  holidays_country: {json.dumps(country.strip().upper())}"])
+    except ValueError as e:
+        return _refuse(str(e))
+    return _write_config_lines(path, lines) or {
+        "success": True, "harvey_running": bool(_check_harvey_pid())}
+
+
+# ── Categories: the example site shown to each kind of business ──
+
+@app.get("/api/settings/demos")
+async def get_demos():
+    """The categories in match order, how many companies each one catches
+    (the first whose keyword is in a company's industry), and the industries
+    no category catches yet."""
+    from harvey.config import load_config
+    from harvey.decide import find_demo
+    demos = load_config(str(_resolve_config_file())).channels.whatsapp.demos
+    caught, missed = [0] * len(demos), []
+    for row in await query_db("SELECT industry, COUNT(*) AS n FROM companies GROUP BY industry ORDER BY n DESC"):
+        demo = find_demo(row["industry"], demos)
+        if demo:
+            caught[demos.index(demo)] += row["n"]
+        elif row["industry"]:
+            missed.append({"industry": row["industry"], "n": row["n"]})
+    return {"demos": [{**d.model_dump(), "companies": n} for d, n in zip(demos, caught)],
+            "unmatched": missed[:15], "unmatched_total": sum(m["n"] for m in missed)}
+
+
+@app.post("/api/settings/demos")
+async def save_demos(request: Request):
+    """Rewrite channels.whatsapp.demos, in the order given: the first match wins."""
+    raw = (await _json_body(request)).get("demos")
+    if not isinstance(raw, list) or len(raw) > 100:
+        return _refuse("Send a list of up to 100 categories.")
+    demos = []
+    for d in raw:
+        if not isinstance(d, dict):
+            return _refuse("Each category needs a name, a site and keywords.")
+        label = " ".join(str(d.get("label") or "").split())[:60]
+        url = str(d.get("url") or "").strip()
+        words = d.get("keywords")
+        if not label:
+            return _refuse("Each category needs a name.")
+        if (urlparse(url).scheme != "https" or not urlparse(url).hostname or len(url) > 300
+                or any(c.isspace() for c in url)):
+            return _refuse(f"{label}: the demo site must be an https:// address.")
+        if not isinstance(words, list) or not words or len(words) > 60:
+            return _refuse(f"{label}: give between 1 and 60 keywords.")
+        # Matched as lowercase fragments of the industry; a leading space ("  law") is kept on purpose.
+        words = [str(w).lower().rstrip() for w in words if isinstance(w, str) and str(w).strip()][:60]
+        if not words or any(len(w) > 40 for w in words):
+            return _refuse(f"{label}: keywords are short words, up to 40 characters.")
+        if label.lower() in (x["label"].lower() for x in demos):
+            return _refuse(f"{label} is listed twice.")
+        demos.append({"label": label, "url": url, "keywords": words})
+    path = _resolve_config_file()
+    lines = read_user_text(path).split("\n")
+    q = lambda v: json.dumps(v, ensure_ascii=False)   # a JSON value is valid YAML flow style
+    try:
+        lines = _replace_config_key(lines, ["channels", "whatsapp", "demos"], [
+            "    demos:                     # first match wins: specific before generic"] + [
+            f"      - {{label: {q(d['label'])}, url: {q(d['url'])}, keywords: {q(d['keywords'])}}}"
+            for d in demos] if demos else ["    demos: []"])
     except ValueError as e:
         return _refuse(str(e))
     return _write_config_lines(path, lines) or {

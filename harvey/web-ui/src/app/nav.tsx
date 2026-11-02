@@ -2,15 +2,15 @@ import { createContext, useCallback, useContext, useState } from 'react'
 
 export type TabId =
   | 'today' | 'outbox' | 'conversations'
-  | 'signals' | 'discover' | 'companies' | 'prospects' | 'campaigns'
+  | 'signals' | 'discover' | 'companies' | 'prospects' | 'campaigns' | 'categories'
   | 'activity' | 'usage' | 'controls' | 'settings' | 'help'
 
 export const TAB_IDS: TabId[] = [
   'today', 'outbox', 'conversations', 'signals', 'discover', 'companies', 'prospects',
-  'campaigns', 'activity', 'usage', 'controls', 'settings', 'help',
+  'campaigns', 'categories', 'activity', 'usage', 'controls', 'settings', 'help',
 ]
 /** Only admins see these (operators work the queue, admins configure it). */
-export const ADMIN_TABS: TabId[] = ['signals', 'discover', 'controls', 'settings']
+export const ADMIN_TABS: TabId[] = ['signals', 'discover', 'categories', 'controls', 'settings']
 
 const KEY = 'harvey-tab'
 

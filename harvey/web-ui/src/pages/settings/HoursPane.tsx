@@ -36,7 +36,7 @@ function HoursForm({ data, reload }: { data: Data; reload: () => Promise<void> }
   async function save() {
     const days = Object.fromEntries(DAYS.map(([d]) => [d, rows[d].open ? `${rows[d].start}-${rows[d].end}` : '']))
     const r = await post<{ success?: boolean; message?: string; harvey_running?: boolean }>('/api/settings/business-hours', { days, holidays_country: country })
-    if (r && r.success) toast(r.harvey_running ? 'Hours saved. Restart Harvey to use them.' : 'Hours saved.', 'success')
+    if (r && r.success) toast('Hours saved. Harvey uses them from its next cycle.', 'success')
     else toast((r && r.message) || 'Save failed — is the dashboard still running?', 'error')
     await reload()
   }

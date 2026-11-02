@@ -14,6 +14,7 @@ export const PAGES: Record<TabId, ComponentType> = {
   companies: page(() => import('@/pages/Companies'), 'CompaniesPage'),
   prospects: page(() => import('@/pages/Contacts'), 'ContactsPage'),
   campaigns: page(() => import('@/pages/Campaigns'), 'CampaignsPage'),
+  categories: page(() => import('@/pages/Categories'), 'CategoriesPage'),
   activity: page(() => import('@/pages/Activity'), 'ActivityPage'),
   usage: page(() => import('@/pages/Usage'), 'UsagePage'),
   controls: page(() => import('@/pages/Controls'), 'ControlsPage'),
