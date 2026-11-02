@@ -69,7 +69,8 @@ services:
     image: cloudflare/cloudflared:2026.10.0
     profiles: ["public"]
     restart: unless-stopped
-    command: tunnel --no-autoupdate run
+    # http2 (TCP): QUIC (UDP) to the edge times out on this network (2026-11-02).
+    command: tunnel --no-autoupdate --protocol http2 run
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARED_TUNNEL_TOKEN:-}
     network_mode: "service:dashboard"
