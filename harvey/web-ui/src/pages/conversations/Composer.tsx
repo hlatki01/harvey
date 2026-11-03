@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Mic, Paperclip, Sparkles, Wand2, X } from 'lucide-react'
+import { Bold, Code, Italic, Mic, Paperclip, Smile, Sparkles, Strikethrough, Wand2, X } from 'lucide-react'
 import { api, JSON_HEADERS } from '@/lib/api'
 import { failMsg, markdownToWhatsapp } from '@/lib/format'
 import { useToast } from '@/components/toast'
@@ -9,6 +9,15 @@ import type { Chat } from './useChat'
 import { Spin } from './Chat'
 
 const MAX_FILE = 16 * 1024 * 1024
+
+// WhatsApp's own markers: what the client's phone renders.
+const FORMATS = [
+  { label: 'Bold', mark: '*', Icon: Bold },
+  { label: 'Italic', mark: '_', Icon: Italic },
+  { label: 'Strikethrough', mark: '~', Icon: Strikethrough },
+  { label: 'Monospace', mark: '`', Icon: Code },
+]
+const EMOJIS = '😀 😁 😂 😊 😉 😍 🤩 😎 🤔 😅 🙂 🙃 😢 😮 🙏 👍 👎 👏 🙌 🤝 👋 💪 👀 ✅ ❌ ⚠️ ⭐ 🔥 🎉 💡 📌 📍 📞 📱 💬 📩 🗓️ ⏰ 🕒 🚗 🔧 🛠️ 🏪 💰 💳 📈 🏆 ❤️ 💙'.split(' ')
 
 function fileSize(n: number) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB' }
 
@@ -40,6 +49,18 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
   const busy = sending || !!thinking
   const box = useRef<HTMLTextAreaElement>(null)
   const pick = useRef<HTMLInputElement>(null)
+  const [emojiOpen, setEmojiOpen] = useState(false)
+
+  // Put `before`/`after` around the selection (or the cursor) in the box.
+  function insert(before: string, after = '') {
+    const el = box.current
+    if (!el) return
+    const { selectionStart: s, selectionEnd: e } = el
+    el.focus()
+    el.setRangeText(before + el.value.slice(s, e) + after, s, e, 'end')
+    if (after && s === e) el.setSelectionRange(s + before.length, s + before.length)
+    setText(el.value)
+  }
   const rec = useRef<Rec | null>(null)
   const sendingRef = useRef(false)
   const textRef = useRef('')
@@ -186,6 +207,27 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
           <button type="button" aria-label="Remove file" className="px-1 text-text-2" onClick={() => setFile(null)}><X className="size-3.5" /></button>
         </div>
       )}
+      <div className="relative mb-1 flex items-center gap-0.5">
+        {FORMATS.map(({ label, mark, Icon }) => (
+          <Button key={label} variant="ghost" size="sm" className="h-7 px-1.5" title={label} aria-label={label}
+            disabled={busy} onMouseDown={e => e.preventDefault()} onClick={() => insert(mark, mark)}>
+            <Icon className="size-4" />
+          </Button>
+        ))}
+        <Button variant="ghost" size="sm" className="h-7 px-1.5" title="Emoji" aria-label="Emoji" aria-expanded={emojiOpen}
+          disabled={busy} onMouseDown={e => e.preventDefault()} onClick={() => setEmojiOpen(o => !o)}>
+          <Smile className="size-4" />
+        </Button>
+        {emojiOpen && (
+          <div role="listbox" aria-label="Emoji" onKeyDown={e => e.key === 'Escape' && setEmojiOpen(false)}
+            className="absolute bottom-full left-0 z-20 mb-1 grid w-[17rem] grid-cols-8 gap-0.5 rounded-lg bg-surface p-1.5 shadow-pop">
+            {EMOJIS.map(em => (
+              <button key={em} type="button" role="option" aria-selected={false} className="rounded-md p-1 text-lg leading-none hover:bg-accent-soft"
+                onMouseDown={e => e.preventDefault()} onClick={() => { insert(em); setEmojiOpen(false) }}>{em}</button>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="flex items-end gap-2">
         <input ref={pick} type="file" hidden onChange={onPick}
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" />
