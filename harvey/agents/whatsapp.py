@@ -426,18 +426,20 @@ Return ONLY a JSON array:
             # The live loop polls every few seconds: keep its note out of the log.
             (logger.debug if replies_only else logger.info)(f"WhatsApp: outside business hours; holding sends until {opens:%a %H:%M}.")
             return
-        sent_today = await self.state.count_outbox_sent_today(channel="whatsapp")
-        budget = min(MAX_SENDS_PER_CYCLE, self.cfg.max_daily_sends - sent_today)
-        if budget <= 0:
-            logger.info(f"WhatsApp: daily cap reached ({sent_today}/{self.cfg.max_daily_sends}).")
-            return
+        # The daily cap limits cold openings; answering someone who wrote in
+        # never waits for tomorrow because the openings used the day up.
+        cold_sent = await self.state.count_outbox_sent_today(channel="whatsapp", kind="sequence")
+        cold_left = self.cfg.max_daily_sends - cold_sent
+        budget = MAX_SENDS_PER_CYCLE
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         # Answers to people already talking go first: a backlog of openings,
         # all due earlier, would otherwise fill the page and hold them for hours.
         due = await self.state.get_outbox(
             status="approved", due_before=now, limit=budget * 3, channel="whatsapp",
             exclude_kind="sequence")
-        if not replies_only:
+        if not replies_only and cold_left <= 0:
+            logger.info(f"WhatsApp: daily cap reached ({cold_sent}/{self.cfg.max_daily_sends}).")
+        elif not replies_only:
             seen = {i["id"] for i in due}
             due += [i for i in await self.state.get_outbox(
                 status="approved", due_before=now, limit=budget * 3, channel="whatsapp",
@@ -446,6 +448,8 @@ Return ONLY a JSON array:
         for item in due:
             if sent >= budget:
                 break
+            if item["kind"] == "sequence" and cold_left <= 0:
+                continue
             prospect = await self.state.get_prospect(item["prospect_id"])
             blocked = await self._blocked(item, prospect)
             if blocked:
@@ -481,6 +485,8 @@ Return ONLY a JSON array:
                 continue
 
             sent += 1
+            if item["kind"] == "sequence":
+                cold_left -= 1
             await self.state.update_outbox_item(
                 item["id"], status="sent",
                 sent_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),

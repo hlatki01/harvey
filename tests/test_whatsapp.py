@@ -1043,6 +1043,19 @@ async def test_live_replies_are_never_paced(state, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_reply_goes_out_after_the_cold_cap_is_used_up(state):
+    pid = await _contacted_prospect(state)
+    for kind in ("sequence", "reply"):
+        await state.add_outbox_item(prospect_id=pid, to_email="5511987654321", subject="WhatsApp",
+                                    body=kind, kind=kind, step=1, send_at="2000-01-01T00:00:00",
+                                    status="approved", channel="whatsapp")
+    client = FakeEvolution()
+    sender = WhatsAppSender(StubBrain(), state, _config(max_daily_sends=0), _env(), client=client)
+    await sender._drain()
+    assert [body for _, body in client.sent] == ["reply"]      # the opening waits for tomorrow
+
+
+@pytest.mark.asyncio
 async def test_the_team_can_answer_a_whatsapp_chat_from_the_dashboard(state, monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
 
