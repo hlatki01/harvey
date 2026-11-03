@@ -8,7 +8,8 @@ const CHAT_PAGE = 30
 export interface Pending { text: string; file: string; at: number }
 interface ChatState { msgs: ChatMsg[]; more: boolean; loadingOlder: boolean; loaded: boolean; pending: Pending[] }
 const EMPTY: ChatState = { msgs: [], more: false, loadingOlder: false, loaded: false, pending: [] }
-const sig = (m: ChatMsg[]) => m.map(x => x.id + (x.status || '')).join()   // a new receipt re-renders
+// A new receipt or reaction re-renders.
+const sig = (m: ChatMsg[]) => m.map(x => x.id + (x.status || '') + (x.reactions || []).map(r => r.emoji + +r.from_me).join('')).join()
 
 /** The real WhatsApp chat of one conversation: newest 30, older on demand,
  *  re-read every 4s, plus blob URLs for its media (revoked on unmount). */

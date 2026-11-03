@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Check, CheckCheck, Download, Loader2 } from 'lucide-react'
+import { Check, CheckCheck, Download, Loader2, SmilePlus } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { own } from '@/lib/format'
+import { failMsg, own } from '@/lib/format'
+import { api, JSON_HEADERS } from '@/lib/api'
+import { useToast } from '@/components/toast'
 import type { Chat } from './useChat'
 import type { ChatMsg } from './types'
 
@@ -112,6 +114,45 @@ function Receipt({ status }: { status?: string }) {
   )
 }
 
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏']   // the same list the API accepts
+
+/** The reactions on one message, and a picker to set or take back ours. */
+function Reactions({ cid, m, chat }: { cid: string; m: ChatMsg; chat: Chat }) {
+  const toast = useToast()
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const mine = m.reactions?.find(r => r.from_me)?.emoji || ''
+  const react = async (emoji: string) => {
+    setOpen(false); setBusy(true)
+    const r = await api<{ success?: boolean }>('/api/conversations/' + encodeURIComponent(cid) + '/react', {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ message_id: m.id, emoji: emoji === mine ? '' : emoji }) })
+    setBusy(false)
+    if (r && r.success) await chat.refresh()
+    else toast(failMsg(r, 'Could not send the reaction.'), 'error')
+  }
+  return (
+    <div className={cn('mt-1 flex flex-wrap items-center gap-1', m.from_me && 'justify-end')}>
+      {m.reactions?.map(r => (
+        <span key={+r.from_me} title={r.from_me ? 'Our reaction' : 'Their reaction'}
+          className="rounded-full border border-line bg-surface px-1.5 text-[13px] leading-5">{r.emoji}</span>
+      ))}
+      {open ? (
+        <span role="group" aria-label="React" className="flex gap-0.5 rounded-full border border-line bg-surface px-1">
+          {REACTIONS.map(e => (
+            <button key={e} type="button" onClick={() => react(e)} aria-label={'React ' + e} aria-pressed={e === mine}
+              className={cn('rounded-full px-1 text-[15px] leading-6 hover:bg-surface-2', e === mine && 'bg-accent-soft')}>{e}</button>
+          ))}
+        </span>
+      ) : (
+        <button type="button" onClick={() => setOpen(true)} disabled={busy} aria-label="Add a reaction" title="React"
+          className="rounded-full p-0.5 text-text-3 opacity-0 transition-opacity hover:text-text focus-visible:opacity-100 group-hover:opacity-100 max-sm:opacity-60">
+          {busy ? <Spin className="mr-0" /> : <SmilePlus className="size-3.5" aria-hidden />}
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function ChatBubbles({ id, first, chat, onImage }: { id: string; first: string; chat: Chat; onImage: (src: string) => void }) {
   return (
     <>
@@ -121,10 +162,11 @@ export function ChatBubbles({ id, first, chat, onImage }: { id: string; first: s
         </div>
       )}
       {chat.msgs.map(m => (
-        <div key={m.id} className={bubble(m.from_me)}>
+        <div key={m.id} className={cn(bubble(m.from_me), 'group')}>
           <div className="mb-0.5 text-[11px] opacity-70">{(m.who && own(WHO, m.who)) || first} &middot; {chatTime(m.ts)}{m.from_me && <Receipt status={m.status} />}</div>
           {m.media && <Media cid={id} m={m} chat={chat} onImage={onImage} />}
           {m.text && <div>{m.text}</div>}
+          <Reactions cid={id} m={m} chat={chat} />
         </div>
       ))}
       {chat.pending.map((p, i) => (

@@ -2316,6 +2316,56 @@ async def conversation_media(convo_id: str, message_id: str):
                              "Content-Disposition": 'inline; filename="%s"' % (filename or "file").replace('"', "")})
 
 
+REACTIONS = ("👍", "❤️", "😂", "😮", "😢", "🙏")   # WhatsApp's quick row; the UI offers the same
+
+
+async def _chat_message(client, phone: str, message_id: str) -> dict | None:
+    """The message `message_id` if it is in this chat (recent or older), else None."""
+    recent, _ = await client.get_chat(phone, limit=60)
+    found = next((m for m in recent if m["id"] == message_id), None)
+    if found is None and recent:
+        older, _ = await client.get_chat(phone, limit=200, before=min(m["ts"] for m in recent))
+        found = next((m for m in older if m["id"] == message_id), None)
+    return found
+
+
+@app.post("/api/conversations/{convo_id}/react")
+async def conversation_react(convo_id: str, request: Request):
+    """React to one message of this chat on WhatsApp: {message_id, emoji};
+    an empty emoji removes the reaction."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    message_id, emoji = str(data.get("message_id") or ""), str(data.get("emoji") or "")
+    if not message_id or (emoji and emoji not in REACTIONS):
+        return _refuse("Pick one of the reactions offered.", 400)
+    row, err = await _whatsapp_chat_of(convo_id)
+    if err:
+        return err
+    if row["pstatus"] == "opted_out":
+        return _refuse("This person opted out. Nothing can be sent to them.")
+    client = _evolution()
+    if client is None:
+        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
+                            status_code=503)
+    try:
+        target = await _chat_message(client, row["phone"], message_id)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": f"Could not read the chat: {e}"}, status_code=502)
+    if target is None:
+        return JSONResponse({"success": False, "message": "That message is not in this chat."}, status_code=404)
+    result = await client.send_reaction(target.get("jid") or row["phone"] + "@s.whatsapp.net",
+                                        target["from_me"], message_id, emoji)
+    if not result.ok:
+        return JSONResponse({"success": False, "message": f"WhatsApp did not send it: {result.error}"},
+                            status_code=502)
+    await _state().log_action("whatsapp_reaction", "dashboard",
+                              {"to": row["phone"], "message_id": message_id, "emoji": emoji})
+    return {"success": True}
+
+
 MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024
 
 

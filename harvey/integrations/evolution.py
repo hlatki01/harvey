@@ -71,14 +71,15 @@ def normalize_message(rec: dict) -> dict | None:
     what is not a message to show (reactions, protocol notices).
 
     {id, from_me, ts, text, media: {kind, mimetype, filename} | None,
-     status: "sent" | "delivered" | "read" | "" (ours only)}"""
+     status: "sent" | "delivered" | "read" | "" (ours only),
+     jid: the chat id WhatsApp keeps it under (what a reaction must name)}"""
     key = rec.get("key") or {}
     msg = rec.get("message") or {}
     if not key.get("id") or not msg or "reactionMessage" in msg or "protocolMessage" in msg:
         return None
     # A document with a caption arrives wrapped one level deeper.
     msg = ((msg.get("documentWithCaptionMessage") or {}).get("message")) or msg
-    out = {"id": key["id"], "from_me": bool(key.get("fromMe")),
+    out = {"id": key["id"], "from_me": bool(key.get("fromMe")), "jid": key.get("remoteJid") or "",
            "ts": int(rec.get("messageTimestamp") or 0), "text": "", "media": None,
            "status": _receipt(rec) if key.get("fromMe") else ""}
     for field, kind in MEDIA_KINDS.items():
@@ -219,12 +220,22 @@ class EvolutionClient:
         phone as remoteJidAlt (what they sent). Both are read and merged."""
         jid = phone + USER_JID_SUFFIX
         merged: dict[str, dict] = {}
+        # {target id: {from_me: (ts, emoji)}}: one reaction per side, the latest; "" removes it.
+        reactions: dict[str, dict[bool, tuple[int, str]]] = {}
         more = False
         for where in ({"key": {"remoteJid": jid}}, {"key": {"remoteJidAlt": jid}}):
             page, size, have = 1, max(limit, 30) if not before else 100, 0
             while page <= 20:
                 records, pages = await self._chat_page(where, page, size)
                 for rec in records:
+                    react = (rec.get("message") or {}).get("reactionMessage")
+                    if react:
+                        target = (react.get("key") or {}).get("id")
+                        side = bool((rec.get("key") or {}).get("fromMe"))
+                        ts = int(rec.get("messageTimestamp") or 0)
+                        if target and ts >= reactions.get(target, {}).get(side, (-1, ""))[0]:
+                            reactions.setdefault(target, {})[side] = (ts, react.get("text") or "")
+                        continue
                     m = normalize_message(rec)
                     if m and (not before or m["ts"] < before):
                         merged[m["id"]] = m
@@ -233,8 +244,23 @@ class EvolutionClient:
                     more = more or page < pages
                     break
                 page += 1
+        for m in merged.values():
+            # shortcut: only reactions within the pages read show; one on a much older message waits until it is
+            # reread with the reaction in range. Fine while chats are short; upgrade by querying reactions by target id.
+            m["reactions"] = [{"emoji": e, "from_me": side}
+                              for side, (_, e) in sorted(reactions.get(m["id"], {}).items()) if e]
         ordered = sorted(merged.values(), key=lambda m: m["ts"], reverse=True)
         return ordered[:limit][::-1], more or len(ordered) > limit
+
+    async def send_reaction(self, jid: str, from_me: bool, message_id: str, emoji: str) -> SendResult:
+        """React to one message of a chat ("" removes our reaction)."""
+        async with self._client() as client:
+            r = await client.post(self._url("message/sendReaction"), json={
+                "key": {"remoteJid": jid, "fromMe": from_me, "id": message_id}, "reaction": emoji})
+        if r.status_code >= 400:
+            return SendResult(ok=False, error=f"Evolution API {r.status_code}: {r.text[:200]}")
+        key = (r.json() or {}).get("key") or {}
+        return SendResult(ok=True, message_id=key.get("id") or "", thread_ref=key.get("remoteJid") or "")
 
     async def get_media(self, message_id: str) -> tuple[bytes, str, str]:
         """(bytes, mimetype, filename) of a media message."""

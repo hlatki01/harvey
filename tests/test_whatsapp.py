@@ -1173,6 +1173,10 @@ async def test_dashboard_chat_and_attachment_endpoints(state, monkeypatch, tmp_p
             self.sent.append((number, filename, mimetype, caption))
             return SendResult(ok=True, message_id="WAM1")
 
+        async def send_reaction(self, jid, from_me, message_id, emoji):
+            self.sent.append(("react", jid, from_me, message_id, emoji))
+            return SendResult(ok=True, message_id="R1")
+
     await _contacted_prospect(state)
     await state.log_action("whatsapp_sent", "whatsapp", {"message_id": "H1", "kind": "reply"})
     await state.log_action("whatsapp_sent", "dashboard", {"message_id": "T1", "kind": "team"})
@@ -1200,6 +1204,38 @@ async def test_dashboard_chat_and_attachment_endpoints(state, monkeypatch, tmp_p
     assert ok.status_code == 200 and client.sent == [("5511987654321", "foto.png", "image/png", "olha")]
     assert "WAM1" in await state.get_whatsapp_sent_ids()
     assert http.post(f"/api/conversations/{convo_id}/attach", json={"filename": "x", "data": "!!"}).status_code == 400
+
+    client.sent.clear()
+    react = lambda **body: http.post(f"/api/conversations/{convo_id}/react", json=body)  # noqa: E731
+    assert react(message_id="L1", emoji="👍").status_code == 200
+    assert client.sent == [("react", "5511987654321@s.whatsapp.net", False, "L1", "👍")]
+    assert react(message_id="L1", emoji="💩").status_code == 400          # only the offered ones
+    assert react(message_id="X9", emoji="👍").status_code == 404          # not in this chat
+    assert len(client.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_chat_carries_each_sides_latest_reaction():
+    from harvey.integrations.evolution import EvolutionClient
+
+    def reaction(i, target, emoji, mine, ts):
+        return {"key": {"id": i, "fromMe": mine}, "messageTimestamp": ts,
+                "message": {"reactionMessage": {"key": {"id": target}, "text": emoji}}}
+
+    records = [_rec("M1", 1, True), _rec("M2", 2),
+               reaction("r1", "M1", "👍", False, 3), reaction("r2", "M1", "❤️", False, 4),   # changed their mind
+               reaction("r3", "M1", "🙏", True, 5),
+               reaction("r4", "M2", "😂", True, 6), reaction("r5", "M2", "", True, 7)]        # and removed
+    client = EvolutionClient("http://x", "k", "i")
+
+    async def page(where, page, size):
+        return (records if "remoteJid" in where["key"] else []), 1
+
+    client._chat_page = page
+    msgs, _ = await client.get_chat("5511987654321")
+    assert [m["id"] for m in msgs] == ["M1", "M2"]
+    assert msgs[0]["reactions"] == [{"emoji": "❤️", "from_me": False}, {"emoji": "🙏", "from_me": True}]
+    assert msgs[1]["reactions"] == []
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,7 @@ export interface ChatMsg {
   text?: string
   media?: ChatMedia | null
   status?: 'sent' | 'delivered' | 'read' | ''   // WhatsApp receipt, ours only
+  reactions?: { emoji: string; from_me: boolean }[]
 }
 
 export interface LeadInfo {
