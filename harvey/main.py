@@ -190,22 +190,32 @@ async def _run_agents(tasks: list) -> dict:
         return {}
     if len(tasks) > 1:
         logger.info(f"Running {len(tasks)} agents in parallel: {[t[0] for t in tasks]}")
+    running = [(name, asyncio.ensure_future(coro)) for name, coro in tasks]
+    futures = [f for _, f in running]
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*[t[1] for t in tasks], return_exceptions=True),
-            timeout=CYCLE_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
+        _, pending = await asyncio.wait(futures, timeout=CYCLE_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        for f in futures:
+            f.cancel()
+        raise
+    if pending:
+        # Only the slow ones are cut off: what already finished (a reply read,
+        # say) keeps its outcome instead of the whole cycle being thrown away.
         logger.error(
             f"Cycle timed out after {CYCLE_TIMEOUT_SECONDS}s with "
-            f"{[t[0] for t in tasks]} still running — cancelled, "
+            f"{[n for n, f in running if f in pending]} still running — cancelled, "
             "moving on to the next heartbeat instead of hanging forever."
         )
-        results = []
+        for f in pending:
+            f.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     outcomes = {}
-    for (name, _), result in zip(tasks, results):
-        if isinstance(result, asyncio.CancelledError):
-            raise result
+    for name, f in running:
+        if f in pending:
+            continue
+        if f.cancelled():
+            raise asyncio.CancelledError
+        result = f.exception() or f.result()
         if isinstance(result, Exception):
             logger.error(f"Agent {name} failed: {result}", exc_info=result)
         outcomes[name] = result

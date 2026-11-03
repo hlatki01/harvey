@@ -648,6 +648,11 @@ async def profile_companies(state, companies: list[dict]) -> tuple[int, str]:
             n = await collector.run(companies, run_id=run_id)
         await state.finish_run(run_id, records=n, cost_usd=0.0)
         return n, run_id
+    except asyncio.CancelledError:
+        # The heartbeat's cycle timeout cancels us; CancelledError isn't an
+        # Exception, so without this the run row stays 'running' forever.
+        await state.finish_run(run_id, status="cancelled", error="cycle timed out")
+        raise
     except Exception as e:
         await state.finish_run(run_id, status="failed", error=str(e))
         raise

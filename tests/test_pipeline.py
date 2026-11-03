@@ -383,3 +383,36 @@ async def test_harvey_adds_a_city_at_most_as_often_as_allowed(state, config, mon
     assert [q.coordinate for q in queries if q.location == "Guarapuava, PR"][0] == "-25.0,-50.0,30"
     assert await state.remove_discovery_city("Guarapuava, PR")
     assert {q.location for q in await P.discovery_queries(state, config)} == {"Curitiba, PR"}
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_profile_run_is_closed_not_left_running(state, monkeypatch):
+    """The heartbeat's cycle timeout cancels profiling; the run row must not
+    stay 'running' or the dashboard says the job stopped before finishing."""
+    import asyncio
+    from harvey.collectors import profile as PR
+
+    async def hang(self, companies, run_id=""):
+        raise asyncio.CancelledError
+    monkeypatch.setattr(PR.ProfileCollector, "run", hang)
+    with pytest.raises(asyncio.CancelledError):
+        await PR.profile_companies(state, [{"id": "x", "domain": "baker.com"}])
+    assert [r["status"] for r in await state.get_runs()] == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_agent_does_not_throw_away_the_ones_that_finished(monkeypatch):
+    """One slow agent used to cancel the whole cycle and drop every outcome,
+    so a finished read_replies looked unread and sending was held."""
+    import asyncio
+    from harvey import main as M
+    monkeypatch.setattr(M, "CYCLE_TIMEOUT_SECONDS", 0.2)
+
+    async def quick():
+        return True
+
+    async def slow():
+        await asyncio.sleep(10)
+
+    out = await M._run_agents([("read_replies", quick()), ("profile", slow())])
+    assert out == {"read_replies": True}
