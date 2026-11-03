@@ -10,6 +10,7 @@ against mocked responses only, never against a live instance.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -22,6 +23,16 @@ TIMEOUT = 30
 USER_JID_SUFFIX = "@s.whatsapp.net"
 # Typing time shown to the recipient before the text arrives, in ms.
 TYPING_DELAY_MS = 2500
+
+
+def markdown_to_whatsapp(text: str) -> str:
+    """Markdown typed in the dashboard, in WhatsApp's own formatting.
+    A single *x* is already WhatsApp bold, so it is left alone."""
+    text = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"*{m[1] or m[2]}*", text)
+    text = re.sub(r"~~(.+?)~~", r"~\1~", text)
+    text = re.sub(r"^#{1,6}[ \t]+(.+?)[ \t]*#*$", r"*\1*", text, flags=re.M)
+    return re.sub(r"\[([^\]]+)\]\((\S+?)\)",
+                  lambda m: m[2] if m[1] == m[2] else f"{m[1]}: {m[2]}", text)
 
 
 @dataclass
@@ -128,7 +139,7 @@ class EvolutionClient:
     async def send_text(self, number: str, text: str) -> SendResult:
         async with self._client() as client:
             r = await client.post(self._url("message/sendText"),
-                                  json={"number": number, "text": text,
+                                  json={"number": number, "text": markdown_to_whatsapp(text),
                                         "delay": TYPING_DELAY_MS})
         if r.status_code >= 400:
             try:
@@ -235,7 +246,7 @@ class EvolutionClient:
         else:
             path = "message/sendMedia"
             payload = {"number": number, "mediatype": kind if kind in ("image", "video") else "document",
-                       "mimetype": mimetype, "caption": caption, "media": b64, "fileName": filename}
+                       "mimetype": mimetype, "caption": markdown_to_whatsapp(caption), "media": b64, "fileName": filename}
         async with self._client() as client:
             r = await client.post(self._url(path), json=payload)
         if r.status_code >= 400:

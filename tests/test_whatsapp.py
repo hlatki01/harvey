@@ -1472,3 +1472,11 @@ async def test_a_chat_left_on_our_last_word_gets_its_remaining_follow_up(state):
     [convo] = await state.get_conversations_by_status("open")
     assert convo.follow_ups == 1          # the reminder already sent counts: one light nudge left
     assert convo.follow_up_at             # planned (overdue ones go out on this or the next cycle)
+
+
+def test_markdown_becomes_whatsapp_formatting():
+    from harvey.integrations.evolution import markdown_to_whatsapp
+    assert markdown_to_whatsapp("**Oficina:** https://x.me") == "*Oficina:* https://x.me"
+    assert markdown_to_whatsapp("## Exemplos\n~~velho~~ __novo__ *já*") == "*Exemplos*\n~velho~ *novo* *já*"
+    assert markdown_to_whatsapp("[Peças](https://x.me/pecas) [https://a.me](https://a.me)") == \
+        "Peças: https://x.me/pecas https://a.me"
