@@ -153,3 +153,40 @@ async def test_a_hand_over_push_links_straight_to_the_conversation(state):
     convo_id = (await state.get_handoffs())[0]["id"]
     pushes = [t for n, t in client.sent if n == OWNER]
     assert len(pushes) == 1 and pushes[0].endswith(f"\nhttps://painel.example.com/?conversation={convo_id}")
+
+
+@pytest.mark.asyncio
+async def test_an_objection_is_not_a_hot_lead(state):
+    await _contacted_prospect(state)
+    client = FakeEvolution()
+    client.inbound = [WhatsAppInbound("M1", "5511987654321", "Agora não dá, estamos sem tempo")]
+    handler = _handler(state, client, StubBrain(intent="objection", text="Sem problemas."))
+    handler.config = _notifying(events=["hot_lead"])
+    await handler.run_whatsapp()
+
+    assert not [t for n, t in client.sent if n == OWNER]
+
+
+@pytest.mark.asyncio
+async def test_writing_after_opting_out_is_never_answered_or_a_lead(state):
+    """'Sair', then 'obrigado': the opt-out stands, nobody is pushed or answered."""
+    pid = await _contacted_prospect(state)
+    await state.update_prospect_status(pid, "opted_out")
+    client = FakeEvolution()
+    client.inbound = [WhatsAppInbound("M1", "5511987654321", "obrigado")]
+    handler = _handler(state, client, StubBrain(intent="interested", text="Que bom!"))
+    handler.config = _notifying(events=["hot_lead", "handoff"])
+    await handler.run_whatsapp()
+
+    assert (await state.get_prospect_by_phone("5511987654321")).status == "opted_out"
+    assert client.sent == []
+    assert await state.get_conversations_by_status("open") == []
+
+
+def test_a_reply_seconds_after_ours_is_flagged_as_likely_automatic():
+    from harvey.agents.handler import _timing_note
+    sent = ["2026-11-03T14:37:46.711579", None]
+    at = 1793716666 + 5      # 2026-11-03 14:37:46 UTC, plus 5 s
+    assert "4 seconds" in _timing_note(str(at), sent)
+    assert _timing_note(str(at + 300), sent) == ""
+    assert _timing_note("", sent) == "" and _timing_note(str(at), [None]) == ""

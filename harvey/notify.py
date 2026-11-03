@@ -78,13 +78,17 @@ async def push(state, config, event: str, key: str, text: str, client=None) -> b
     return ok
 
 
+HOT_INTENTS = ("interested", "question")
+
+
 async def on_stage_change(state, config, prospect, convo, old_stage: str, reply_text: str,
                           client=None) -> None:
     """A conversation moved stage: tell the CRM webhook, and push a hot one."""
     if convo.stage == old_stage:
         return
     await crm.post_stage_change(config, prospect, convo, old_stage, reply_text)
-    if convo.stage not in _settings(config).hot_stages:
+    # An objection also moves a chat to "qualifying"; it's no reason to ring you.
+    if convo.stage not in _settings(config).hot_stages or convo.intent not in HOT_INTENTS:
         return
     await push(state, config, "hot_lead", f"hot:{convo.id}:{convo.stage}",
                f"Roadie Crew: hot lead, {_who(prospect)} is now {convo.stage} ({convo.channel}).\n"

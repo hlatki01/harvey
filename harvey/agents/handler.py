@@ -175,6 +175,24 @@ _LINK_ANNOTATION_RE = re.compile(r"<(?:mailto:|https?://)[^>\s]*>", re.IGNORECAS
 _MERGE_TAG_RE = re.compile(r"\{\{\s*\w+\s*\}\}")
 
 
+QUICK_REPLY_SECONDS = 60
+
+
+def _timing_note(arrived: str, sent_at) -> str:
+    """A reply seconds after our message, before anyone could read it, is how a
+    WhatsApp Business greeting or away message behaves: tell the model so."""
+    sent = [s for s in sent_at if s]
+    if not arrived.isdigit() or not sent:
+        return ""
+    ours = datetime.fromisoformat(str(max(sent))).replace(tzinfo=timezone.utc)
+    gap = int(arrived) - ours.timestamp()
+    if not 0 <= gap <= QUICK_REPLY_SECONDS:
+        return ""
+    return (f"Their last message arrived {int(gap)} seconds after our last message. Unless it is a "
+            "word or two (\"sim\", \"sair\"), a reply that fast is almost always automatic: "
+            "a greeting, a description of the business or an away message.\n")
+
+
 def _flat(text: str) -> str:
     """Lowercase, with quote markers, HTML entities, link annotations, curly
     quotes and spacing evened out, so text compares however a mail client
@@ -432,6 +450,17 @@ class Handler:
         stripped = strip_quoted_reply(reply_text) or reply_text
         reply_text = ours.remove(stripped).strip() or stripped
 
+        if prospect.status == "opted_out":
+            # They told us to stop, and that's final: what they write afterwards
+            # ("obrigado", "estamos vendendo a loja") is never answered, pushed,
+            # followed up or allowed to undo the opt-out by overwriting the status.
+            await self.state.log_action(
+                action_type="after_opt_out", agent="handler",
+                details={"prospect_id": prospect.id, "channel": channel,
+                         "reply_preview": reply_text[:200]})
+            logger.info(f"Handler: {lead_email} opted out earlier; message recorded, not answered.")
+            return
+
         # Update prospect status + stop-on-reply: a human answered, so every
         # queued sequence email for them is now wrong to send.
         await self.state.update_prospect_status(prospect.id, "replied")
@@ -497,6 +526,7 @@ class Handler:
 
         # 2b. Draft the reply now, while nothing is stored yet. A held
         # Instantly setup can't send it, so don't spend a model call on it.
+        arrived = str((reply_meta or {}).get("date") or "")
         held = (channel == "email" and not self.is_native
                 and legacy_sending_held(self.config))
         response = ""
@@ -516,7 +546,7 @@ class Handler:
             if human_turn:
                 intent = "question"          # theirs to answer; Harvey stays out
             else:
-                decision = await self._decide_whatsapp("", reply_text, prospect, convo)
+                decision = await self._decide_whatsapp("", reply_text, prospect, convo, arrived)
                 intent, response = decision.intent, decision.reply
             logger.info(f"Handler: Intent for {lead_email}: {intent}")
         convo.intent = intent
@@ -524,7 +554,7 @@ class Handler:
         if (decision is None and slot is None and intent in AUTO_REPLY_INTENTS
                 and not held and not human_turn):
             if channel == "whatsapp":
-                decision = await self._decide_whatsapp(intent, reply_text, prospect, convo)
+                decision = await self._decide_whatsapp(intent, reply_text, prospect, convo, arrived)
                 response = decision.reply
             else:
                 response = await self._generate_response(intent, reply_text, prospect, convo)
@@ -907,7 +937,7 @@ class Handler:
                 if prospect:  # chats with anyone else are not ours to answer
                     await self._process_reply(
                         msg.phone, msg.body, reply_uuid="",
-                        prospect=prospect, channel="whatsapp")
+                        prospect=prospect, channel="whatsapp", reply_meta={"date": msg.date})
                     handled += 1
             except BrainUnavailable as e:
                 consumed = False
@@ -1322,7 +1352,7 @@ Respond with ONLY the category label, nothing else."""
         return current_stage
 
     async def _decide_whatsapp(
-        self, intent: str, reply_text: str, prospect, convo: Conversation
+        self, intent: str, reply_text: str, prospect, convo: Conversation, arrived: str = ""
     ) -> Decision:
         """The model proposes a decision for this chat; the policy in
         harvey/decide.py turns it into what Harvey actually does."""
@@ -1333,6 +1363,8 @@ Respond with ONLY the category label, nothing else."""
                   if i["prospect_id"] == prospect.id
                   and i["status"] in ("pending_review", "approved", "sending", "sent")]
         demo_sent = bool(demo and any(demo.url in t for t in said + queued))
+        timing = _timing_note(arrived, [i.get("sent_at") for i in await self.state.get_outbox(
+            channel="whatsapp", limit=500) if i["prospect_id"] == prospect.id])
         history = "\n".join(
             f"{'Theo' if m.sender == 'harvey' else 'Cliente'}: {m.content}"
             for m in convo.thread[-8:])
@@ -1359,7 +1391,7 @@ Business: {prospect.company or "unknown"}
 Kind of business: {prospect.industry or "unknown"}
 Example site available: {demo_line}
 {("Their last message was classified as: " + intent) if intent else ""}
-{origin}
+{origin}{timing}
 ## Conversation
 {history}
 
