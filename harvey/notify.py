@@ -112,6 +112,8 @@ async def state_alerts(state) -> list[tuple]:
             thread = json.loads(c["thread_json"] or "[]")
         except (json.JSONDecodeError, TypeError):
             thread = []
+        if thread and thread[-1].get("sender") == "team":
+            continue   # the team answered last: it's the lead's turn, nobody to call
         last = next((m["content"] for m in reversed(thread) if m.get("sender") == "prospect"), "")
         raised.append((f"handoff:{c['id']}", f"{_who(c)} needs you",
                        last[:140] or "Roadie Crew handed this conversation over.",

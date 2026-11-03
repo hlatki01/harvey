@@ -79,6 +79,20 @@ async def test_a_hand_over_pushes_to_the_owner_once(state):
 
 
 @pytest.mark.asyncio
+async def test_the_team_answering_a_chat_is_not_a_hand_over(state):
+    from harvey.models.conversation import Conversation, Message
+
+    pid = await _contacted_prospect(state)
+    await state.add_conversation(Conversation(
+        id="", prospect_id=pid, channel="whatsapp", status="needs_human",
+        thread=[Message(sender="prospect", content="gostaria sim"),
+                Message(sender="team", content="Que bom! Veja o exemplo.")]))
+    client = FakeEvolution()
+    await notify.push_alerts(state, _notifying(), client)
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
 async def test_a_hot_lead_pushes_when_it_enters_a_hot_stage(state):
     await _contacted_prospect(state)
     client = FakeEvolution()
