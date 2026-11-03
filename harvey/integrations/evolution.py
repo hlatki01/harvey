@@ -56,11 +56,22 @@ MEDIA_KINDS = {"imageMessage": "image", "videoMessage": "video", "audioMessage":
                "documentMessage": "document", "stickerMessage": "image"}
 
 
+# WhatsApp's receipts, lowest first; they arrive out of order, so the best one wins.
+_RECEIPTS = {"SERVER_ACK": "sent", "DELIVERY_ACK": "delivered", "READ": "read", "PLAYED": "read"}
+_RANK = ["", "sent", "delivered", "read"]
+
+
+def _receipt(rec: dict) -> str:
+    seen = [rec.get("status")] + [u.get("status") for u in rec.get("MessageUpdate") or [] if isinstance(u, dict)]
+    return max((_RECEIPTS.get(s or "", "") for s in seen), key=_RANK.index)
+
+
 def normalize_message(rec: dict) -> dict | None:
     """One Evolution record as the dashboard's chat sees it, or None for
     what is not a message to show (reactions, protocol notices).
 
-    {id, from_me, ts, text, media: {kind, mimetype, filename} | None}"""
+    {id, from_me, ts, text, media: {kind, mimetype, filename} | None,
+     status: "sent" | "delivered" | "read" | "" (ours only)}"""
     key = rec.get("key") or {}
     msg = rec.get("message") or {}
     if not key.get("id") or not msg or "reactionMessage" in msg or "protocolMessage" in msg:
@@ -68,7 +79,8 @@ def normalize_message(rec: dict) -> dict | None:
     # A document with a caption arrives wrapped one level deeper.
     msg = ((msg.get("documentWithCaptionMessage") or {}).get("message")) or msg
     out = {"id": key["id"], "from_me": bool(key.get("fromMe")),
-           "ts": int(rec.get("messageTimestamp") or 0), "text": "", "media": None}
+           "ts": int(rec.get("messageTimestamp") or 0), "text": "", "media": None,
+           "status": _receipt(rec) if key.get("fromMe") else ""}
     for field, kind in MEDIA_KINDS.items():
         if field in msg:
             body = msg[field] or {}

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Download, Loader2 } from 'lucide-react'
+import { Check, CheckCheck, Download, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { own } from '@/lib/format'
 import type { Chat } from './useChat'
@@ -99,6 +99,18 @@ function Media({ cid, m, chat, onImage }: { cid: string; m: ChatMsg; chat: Chat;
 }
 
 const WHO: Record<string, string> = { harvey: 'Roadie Crew', team: 'Equipe', team_phone: 'Equipe (celular)' }
+const RECEIPT: Record<string, string> = { sent: 'Sent', delivered: 'Delivered', read: 'Read' }
+
+/** WhatsApp's ticks: one when sent, two when delivered, two blue when read. */
+function Receipt({ status }: { status?: string }) {
+  if (!status || !RECEIPT[status]) return null
+  const Icon = status === 'sent' ? Check : CheckCheck
+  return (
+    <span title={RECEIPT[status]} aria-label={RECEIPT[status]} role="img">
+      <Icon className={cn('ml-1 inline size-3.5 align-[-3px]', status === 'read' && 'text-accent')} aria-hidden />
+    </span>
+  )
+}
 
 export function ChatBubbles({ id, first, chat, onImage }: { id: string; first: string; chat: Chat; onImage: (src: string) => void }) {
   return (
@@ -110,7 +122,7 @@ export function ChatBubbles({ id, first, chat, onImage }: { id: string; first: s
       )}
       {chat.msgs.map(m => (
         <div key={m.id} className={bubble(m.from_me)}>
-          <div className="mb-0.5 text-[11px] opacity-70">{(m.who && own(WHO, m.who)) || first} &middot; {chatTime(m.ts)}</div>
+          <div className="mb-0.5 text-[11px] opacity-70">{(m.who && own(WHO, m.who)) || first} &middot; {chatTime(m.ts)}{m.from_me && <Receipt status={m.status} />}</div>
           {m.media && <Media cid={id} m={m} chat={chat} onImage={onImage} />}
           {m.text && <div>{m.text}</div>}
         </div>

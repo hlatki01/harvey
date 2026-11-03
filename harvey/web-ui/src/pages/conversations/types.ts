@@ -28,6 +28,7 @@ export interface ChatMsg {
   who?: string
   text?: string
   media?: ChatMedia | null
+  status?: 'sent' | 'delivered' | 'read' | ''   // WhatsApp receipt, ours only
 }
 
 export interface LeadInfo {

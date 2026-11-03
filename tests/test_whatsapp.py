@@ -1101,6 +1101,18 @@ def test_chat_messages_are_normalized_for_the_dashboard():
     assert normalize_message(_rec("d", 8, message={"reactionMessage": {"text": "👍"}})) is None
 
 
+def test_our_messages_carry_their_best_receipt():
+    from harvey.integrations.evolution import normalize_message
+
+    def status(updates, mine=True):
+        return normalize_message({**_rec("a", 5, mine), "MessageUpdate": [{"status": s} for s in updates]})["status"]
+
+    assert status(["SERVER_ACK", "DELIVERY_ACK", "SERVER_ACK"]) == "delivered"   # out of order
+    assert status(["SERVER_ACK", "READ", "SERVER_ACK"]) == "read"
+    assert status([]) == ""
+    assert status(["READ"], mine=False) == ""
+
+
 @pytest.mark.asyncio
 async def test_chat_merges_both_ids_of_a_chat_and_pages_back_in_time():
     import httpx
