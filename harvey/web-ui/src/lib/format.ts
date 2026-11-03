@@ -145,3 +145,12 @@ export function actionText(a: ActionRow): string {
   const text = String(a.action_type || '').replace(/_/g, ' ')
   return a.agent === 'main' ? 'Heartbeat: ' + text : text
 }
+
+/** Markdown in WhatsApp's own formatting; mirrors markdown_to_whatsapp in integrations/evolution.py. */
+export function markdownToWhatsapp(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => `*${a ?? b}*`)
+    .replace(/~~(.+?)~~/g, '~$1~')
+    .replace(/^#{1,6}[ \t]+(.+?)[ \t]*#*$/gm, '*$1*')
+    .replace(/\[([^\]]+)\]\((\S+?)\)/g, (_, t, u) => (t === u ? u : `${t}: ${u}`))
+}

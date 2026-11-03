@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Mic, Paperclip, Sparkles, Wand2, X } from 'lucide-react'
 import { api, JSON_HEADERS } from '@/lib/api'
-import { failMsg } from '@/lib/format'
+import { failMsg, markdownToWhatsapp } from '@/lib/format'
 import { useToast } from '@/components/toast'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/field'
@@ -206,6 +206,15 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
           disabled={!!thinking} aria-busy={!!thinking}
           placeholder={thinking ? 'Thinking…' : 'Reply on WhatsApp as the team…'} className="min-h-8 flex-1 resize-none py-1.5"
           onChange={e => setText(e.target.value)}
+          onPaste={e => {
+            const pasted = e.clipboardData.getData('text/plain')
+            const converted = markdownToWhatsapp(pasted)
+            if (!pasted || converted === pasted) return
+            e.preventDefault()
+            const el = e.currentTarget
+            el.setRangeText(converted, el.selectionStart, el.selectionEnd, 'end')
+            setText(el.value)
+          }}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(text, file) } }}
         />
         <Button variant="primary" size="sm" className="min-w-[76px]" disabled={busy} onClick={() => send(text, file)}>
