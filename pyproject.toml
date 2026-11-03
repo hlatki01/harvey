@@ -33,6 +33,8 @@ dependencies = [
     "holidays>=0.60,<1",
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
+    # Pinned: integrations/instagram.py patches its password-key lookup.
+    "instagrapi==3.2.2",
 ]
 
 [project.optional-dependencies]

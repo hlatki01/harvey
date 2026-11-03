@@ -830,3 +830,117 @@ def test_homepage_prefers_stronger_brand_over_longer_partial_match():
     html = ('<meta property="og:site_name" content="Kettleman Landscaping">'
             '<title>Landscaping Professionals</title>')
     assert D.site_name_from_html(html, "kettlemanlandscaping.com") == "Kettleman Landscaping"
+
+
+# ── Instagram (instagrapi: the app's own account search, each profile read) ──
+
+
+class _IgApi:
+    """A fake instagrapi Client for the discovery source."""
+    user_id = "100"
+    profiles = {
+        "dentalsorriso": dict(full_name="Dental Sorriso", biography="Agende pelo WhatsApp",
+                              external_url="https://linktr.ee/dentalsorriso", follower_count=1840,
+                              category="Dentist", contact_phone_number="(41) 99876-5432",
+                              is_business=True, is_private=False),
+        "clinicaviva": dict(full_name="Clínica Viva", biography="Odontologia (41) 3333-4444",
+                            external_url="https://www.clinicaviva.com.br/", follower_count=300,
+                            category="", contact_phone_number=None, is_business=True, is_private=False),
+        "pessoal.maria": dict(full_name="Maria", biography="", external_url=None, follower_count=80,
+                              category="", contact_phone_number=None, is_business=False, is_private=False),
+        "privada": dict(full_name="Privada", biography="", external_url=None, follower_count=5,
+                        category="Dentist", contact_phone_number="41999990000",
+                        is_business=True, is_private=True),
+    }
+
+    def __init__(self, block_on=None):
+        self.block_on, self.queries = block_on, []
+
+    def search_users(self, q):
+        self.queries.append(q)
+        from types import SimpleNamespace as NS
+        return [NS(pk=i, username=u) for i, u in enumerate(self.profiles)]
+
+    def user_info(self, pk):
+        from types import SimpleNamespace as NS
+        from instagrapi.exceptions import PleaseWaitFewMinutes
+        username = list(self.profiles)[pk]
+        if username == self.block_on:
+            raise PleaseWaitFewMinutes("please wait a few minutes")
+        return NS(pk=pk, username=username, business_category_name=None,
+                  public_phone_country_code="", public_phone_number="", **self.profiles[username])
+
+
+@pytest.mark.asyncio
+async def test_instagram_adapter_reads_business_accounts(monkeypatch):
+    provider = D.Instagram()
+    api = _IgApi()
+    monkeypatch.setattr(provider, "api", api)
+    async with _client(lambda r: httpx.Response(500)) as client:
+        out = await provider.fetch(client, {}, D.DiscoveryQuery(term="dentista", location="Curitiba"))
+
+    assert api.queries == ["dentista Curitiba"]
+    # Personal accounts (no category, no phone) and private ones are left out.
+    assert [b.instagram_handle for b in out] == ["dentalsorriso", "clinicaviva"]
+    sorriso, viva = out
+    # A link-in-bio page is not a website: this is a no-website business.
+    assert sorriso.has_website is False and sorriso.domain == ""
+    assert sorriso.phone == "5541998765432" and sorriso.category == "Dentist"
+    assert sorriso.identity() == "instagram:dentalsorriso" and sorriso.followers == 1840
+    assert viva.domain == "clinicaviva.com.br" and viva.has_website is True
+    assert viva.phone == "554133334444" and viva.category == "dentista"   # the bio's phone; the query's term
+    assert provider.estimate([D.DiscoveryQuery(term="x")]) == 0
+
+
+@pytest.mark.asyncio
+async def test_instagram_block_keeps_what_was_read_then_fails_fast(monkeypatch):
+    provider = D.Instagram()
+    monkeypatch.setattr(provider, "api", _IgApi(block_on="clinicaviva"))
+    q = D.DiscoveryQuery(term="dentista", location="Curitiba")
+    async with _client(lambda r: httpx.Response(500)) as client:
+        out = await provider.fetch(client, {}, q)
+        assert [b.instagram_handle for b in out] == ["dentalsorriso"]
+        monkeypatch.setattr(provider, "api", _IgApi(block_on="dentalsorriso"))
+        with pytest.raises(RuntimeError, match="pushed back"):
+            await provider.fetch(client, {}, q)
+        # The next query doesn't knock again for an hour.
+        monkeypatch.setattr(provider, "api", _IgApi())
+        with pytest.raises(RuntimeError, match="hour"):
+            await provider.fetch(client, {}, q)
+
+
+def test_instagram_needs_a_login(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)      # no saved session (data/instagram_session.json) here
+    provider = D.Instagram()
+    assert not provider.configured({})
+    assert provider.configured({"instagram_username": "a", "instagram_password": "b"})
+
+
+@pytest.mark.asyncio
+async def test_instagram_facts_become_observations(state, config, register):
+    register(FakeProvider([[biz(name="Dental Sorriso", external_id="instagram:dentalsorriso",
+                                has_website=False, instagram_handle="dentalsorriso",
+                                followers=1840)]]))
+    await D.run_discovery(state, config, "fake", [D.DiscoveryQuery(term="dentista")])
+    rows = {o["signal_code"]: o for o in await state.get_observations()}
+    assert rows["INSTAGRAM_HANDLE"]["value_text"] == "dentalsorriso"
+    assert rows["INSTAGRAM_FOLLOWERS"]["value_num"] == 1840
+    assert "NO_WEBSITE" in rows
+
+
+@pytest.mark.parametrize("raw,handle", [
+    ("https://instagram.com/Padaria.Boa/", "padaria.boa"),
+    ("@padaria_boa", "padaria_boa"),
+    ("padaria", "padaria"),
+    ("https://www.instagram.com/p/abc/", ""),
+    ("not a handle!", ""),
+    ("", ""),
+])
+def test_instagram_handle_from_urls_and_tags(raw, handle):
+    assert D.instagram_handle(raw) == handle
+
+
+def test_phone_from_bio_prefers_the_whatsapp_link():
+    assert D.phone_from_bio("https://wa.me/5541912345678", "ligue (41) 3333-4444") == "5541912345678"
+    assert D.phone_from_bio("", "Fone: (11) 98765-4321") == "5511987654321"
+    assert D.phone_from_bio("", "sem telefone") == ""

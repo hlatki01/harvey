@@ -24,6 +24,7 @@ import asyncio
 import base64
 import logging
 import re
+import time
 from html import unescape
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -322,6 +323,8 @@ class Business:
     source_url: str = ""
     provider: str = ""
     raw_title: str = ""             # SERP evidence for junk filtering before normalization
+    instagram_handle: str = ""      # the business's @, without the "@"
+    followers: int | None = None     # Instagram followers
 
     def identity(self) -> str:
         return self.domain or self.external_id
@@ -806,8 +809,122 @@ class OpenStreetMap(DiscoveryProvider):
                 external_id=f"osm:{el.get('type')}/{el.get('id')}",
                 source_url=f"https://www.openstreetmap.org/{el.get('type')}/{el.get('id')}",
                 provider=self.key,
+                instagram_handle=instagram_handle(
+                    tags.get("contact:instagram") or tags.get("instagram") or ""),
             ))
         return out
+
+
+# ── Instagram ─────────────────────────────────────────────────────────
+
+# First path segments of instagram.com that are pages, not accounts.
+_IG_RESERVED = {"p", "reel", "reels", "explore", "stories", "tv", "accounts", "about",
+                "developer", "legal", "directory", "web", "challenge", "direct", "tags",
+                "locations", "popular", "emails", "privacy", "terms"}
+_IG_URL_RE = re.compile(r"instagram\.com/([A-Za-z0-9._]{1,30})(?=[/?#]|$)", re.I)
+_IG_HANDLE_RE = re.compile(r"^@?([A-Za-z0-9._]{1,30})$")
+# Link-in-bio pages and chat links are not the business's own website.
+_NOT_A_SITE = re.compile(
+    r"(^|\.)(linktr\.ee|linktree\.|beacons\.ai|bio\.link|taplink\.|lnk\.bio|linkin\.bio|"
+    r"wa\.me|whatsapp\.com|instagram\.com|facebook\.com|fb\.com|t\.me|tiktok\.com|"
+    r"linkbio\.|campsite\.bio|direct\.me|msha\.ke)", re.I)
+_WA_LINK_RE = re.compile(r"(?:wa\.me/|api\.whatsapp\.com/send\?phone=)\+?(\d{10,15})", re.I)
+_BIO_PHONE_RE = re.compile(r"(?<!\d)(\+?\d{2}\s?)?\(?\d{2}\)?[\s.-]?9?\d{4}[\s.-]?\d{4}(?!\d)")
+
+
+def instagram_handle(value: str) -> str:
+    """The @ in a profile URL or a bare handle ("@x", "x"), or ""."""
+    value = (value or "").strip()
+    m = _IG_URL_RE.search(value) or _IG_HANDLE_RE.match(value)
+    handle = m.group(1).lower() if m else ""
+    return "" if handle in _IG_RESERVED or handle.strip(".") != handle else handle
+
+
+def phone_from_bio(*texts: str, country: str = "55") -> str:
+    """A WhatsApp link's number, else a phone written in the bio, as digits."""
+    from harvey.phone import normalize_phone
+    joined = " ".join(t for t in texts if t)
+    m = _WA_LINK_RE.search(joined)
+    if m:
+        return normalize_phone("+" + m.group(1), country)
+    m = _BIO_PHONE_RE.search(joined)
+    return normalize_phone(m.group(0), country) if m else ""
+
+
+class Instagram(DiscoveryProvider):
+    """Businesses that live on Instagram, often with no website at all.
+
+    Instagram's own account search (instagrapi, logged in as the account in
+    Settings → Integrations) finds them; each profile is read in full: bio,
+    site, followers, category and the business phone the app shows. Private
+    accounts and accounts with neither a category nor a phone are skipped.
+    """
+
+    key = "instagram"
+    label = "Instagram"
+    kind = "serp"
+    blurb = ("Finds businesses on Instagram — the ones that often have no website. "
+             "Bio, site, followers, category and the business phone, straight from the app.")
+    cost_note = "free"
+    free_tier = "No key: an Instagram login. A few hundred profiles a day before Instagram pushes back"
+    signup_url = "https://www.instagram.com/accounts/emailsignup/"
+    env_keys = ("instagram_username", "instagram_password")
+    caveat = ("Unofficial (instagrapi): Instagram can challenge or block the account, so use "
+              "one you can afford to lose. INSTAGRAM_SESSIONID works instead of the password. "
+              "When Instagram pushes back the run keeps what it read and stops.")
+
+    api = None                        # tests only: a fake instagrapi Client
+    _limited_until: float = 0.0
+
+    def configured(self, env: dict) -> bool:
+        return self._client(env).is_configured()
+
+    def _client(self, env: dict):
+        from harvey.integrations.instagram import InstagramClient
+        return InstagramClient(env.get("instagram_username", ""), env.get("instagram_password", ""),
+                               env.get("instagram_sessionid", ""), api=self.api)
+
+    async def fetch(self, client, env, query):
+        from harvey.config import load_config
+        from harvey.integrations.instagram import InstagramBlocked
+
+        # shortcut: a block here pauses this provider for an hour, not the DM channel
+        # (agents/instagram.py); share the pause when both run from one process.
+        if time.time() < self._limited_until:
+            raise RuntimeError("Instagram pushed back recently; try again in an hour")
+        try:
+            country = load_config().channels.whatsapp.default_country_code
+        except Exception:
+            country = "55"
+        try:
+            profiles = await self._client(env).search_profiles(
+                f"{query.term} {query.location}".strip(), limit=query.limit)
+        except InstagramBlocked as e:
+            self._limited_until = time.time() + 3600
+            raise RuntimeError(f"Instagram pushed back: {e}") from e
+        return [self._to_business(p, query, country) for p in profiles
+                if not p["is_private"] and (p["category"] or p["phone"] or p["is_business"])]
+
+    def _to_business(self, p: dict, query, country: str) -> Business:
+        from harvey.phone import normalize_phone
+        handle = p["username"].lower()
+        site = (p.get("external_url") or "").strip()
+        own_site = site if site and not _NOT_A_SITE.search(normalize_domain(site) or site) else ""
+        phone = (normalize_phone(p["phone"], country) if p.get("phone") else "")             or phone_from_bio(site, p.get("biography") or "", country=country)
+        return Business(
+            name=(p.get("full_name") or "").strip() or handle,
+            domain=normalize_domain(own_site),
+            website=own_site,
+            phone=phone,
+            location=query.location,
+            category=p.get("category") or query.term,
+            has_website=bool(own_site),
+            external_id=f"instagram:{handle}",
+            source_url=f"https://www.instagram.com/{handle}/",
+            provider=self.key,
+            instagram_handle=handle,
+            followers=p.get("follower_count"),
+        )
 
 
 PROVIDERS: dict[str, DiscoveryProvider] = {
@@ -817,6 +934,7 @@ PROVIDERS: dict[str, DiscoveryProvider] = {
         DataForSEOSerp(),
         Serper(),
         GooglePlaces(),
+        Instagram(),
     )
 }
 
@@ -1094,6 +1212,10 @@ def _observations(biz: Business, company_id: str, confirmed: set[str],
         add("REVIEW_RATING", num=float(biz.rating))
     if biz.review_count is not None:
         add("REVIEW_COUNT", num=float(biz.review_count))
+    if biz.instagram_handle:
+        add("INSTAGRAM_HANDLE", text=biz.instagram_handle)
+    if biz.followers is not None:
+        add("INSTAGRAM_FOLLOWERS", num=float(biz.followers))
     return rows
 
 

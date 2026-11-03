@@ -38,7 +38,9 @@ const MIC_ERRORS: Record<string, string> = {
 
 interface Rec { recorder: MediaRecorder; chunks: Blob[]; stream: MediaStream; started: number; send: boolean; type: string }
 
-export function Composer({ id, chat }: { id: string; chat: Chat }) {
+// Instagram carries plain text only: no files, voice notes or formatting markers.
+export function Composer({ id, chat, instagram = false }: { id: string; chat: Chat; instagram?: boolean }) {
+  const app = instagram ? 'Instagram' : 'WhatsApp'
   const toast = useToast()
   const [text, setText] = useState('')
   const [file, setFile] = useState<File | null>(null)
@@ -208,7 +210,7 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
         </div>
       )}
       <div className="relative mb-1 flex items-center gap-0.5">
-        {FORMATS.map(({ label, mark, Icon }) => (
+        {!instagram && FORMATS.map(({ label, mark, Icon }) => (
           <Button key={label} variant="ghost" size="sm" className="h-7 px-1.5" title={label} aria-label={label}
             disabled={busy} onMouseDown={e => e.preventDefault()} onClick={() => insert(mark, mark)}>
             <Icon className="size-4" />
@@ -231,12 +233,14 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
       <div className="flex items-end gap-2">
         <input ref={pick} type="file" hidden onChange={onPick}
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip" />
-        <Button variant="ghost" size="sm" className="px-2" title="Attach a file" aria-label="Attach a file" disabled={busy} onClick={() => pick.current?.click()}>
-          <Paperclip className="size-[18px]" />
-        </Button>
-        <Button variant="ghost" size="sm" className="px-2" title="Record a voice message" aria-label="Record a voice message" disabled={busy} onClick={startRecording}>
-          <Mic className="size-[18px]" />
-        </Button>
+        {!instagram && <>
+          <Button variant="ghost" size="sm" className="px-2" title="Attach a file" aria-label="Attach a file" disabled={busy} onClick={() => pick.current?.click()}>
+            <Paperclip className="size-[18px]" />
+          </Button>
+          <Button variant="ghost" size="sm" className="px-2" title="Record a voice message" aria-label="Record a voice message" disabled={busy} onClick={startRecording}>
+            <Mic className="size-[18px]" />
+          </Button>
+        </>}
         <Button variant="ghost" size="sm" className="px-2" title="Suggest next messages" aria-label="Suggest next messages" disabled={busy} onClick={() => suggest()}>
           {thinking === 'suggest' ? <Spin className="mr-0" /> : <Sparkles className="size-[18px]" />}
         </Button>
@@ -244,13 +248,13 @@ export function Composer({ id, chat }: { id: string; chat: Chat }) {
           {thinking === 'improve' ? <Spin className="mr-0" /> : <Wand2 className="size-[18px]" />}
         </Button>
         <Textarea
-          ref={box} rows={1} value={text} aria-label="Reply on WhatsApp"
+          ref={box} rows={1} value={text} aria-label={`Reply on ${app}`}
           disabled={!!thinking} aria-busy={!!thinking}
-          placeholder={thinking ? 'Thinking…' : 'Reply on WhatsApp as the team…'} className="min-h-8 flex-1 resize-none py-1.5"
+          placeholder={thinking ? 'Thinking…' : `Reply on ${app} as the team…`} className="min-h-8 flex-1 resize-none py-1.5"
           onChange={e => setText(e.target.value)}
           onPaste={e => {
             const pasted = e.clipboardData.getData('text/plain')
-            const converted = markdownToWhatsapp(pasted)
+            const converted = instagram ? pasted : markdownToWhatsapp(pasted)
             if (!pasted || converted === pasted) return
             e.preventDefault()
             const el = e.currentTarget

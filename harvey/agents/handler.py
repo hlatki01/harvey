@@ -31,14 +31,22 @@ from harvey.integrations import calendar
 from harvey.integrations.calendar import CalendarClient
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.evolution import EvolutionClient
+from harvey.integrations.instagram import InstagramBlocked, InstagramClient
+from harvey.agents.instagram import instagram_paused, pause_instagram
 from harvey.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, looks_like_delay, strip_quoted_reply,
 )
 from harvey.models.conversation import Conversation, Message
-from harvey.models.prospect import INBOUND_EMAIL_SOURCE, INBOUND_WHATSAPP_SOURCE, Prospect
+from harvey.models.prospect import (
+    INBOUND_EMAIL_SOURCE, INBOUND_INSTAGRAM_SOURCE, INBOUND_WHATSAPP_SOURCE, Prospect,
+)
 from harvey.state import StateManager
 
 logger = logging.getLogger("harvey.handler")
+
+# Chat apps: one decision engine and outbox ladder; the client differs.
+CHAT_CHANNELS = ("whatsapp", "instagram")
+INSTAGRAM_BACKLOG_SECONDS = 24 * 3600   # older DMs are history, not new messages
 
 KILL_SWITCH_KEY = "sending_paused"
 BOUNCE_COUNT_KEY = "bounce_count"
@@ -304,9 +312,13 @@ class Handler:
         whatsapp = getattr(config.channels, "whatsapp", None)
         self.whatsapp = (EvolutionClient.from_env(env)
                          if getattr(whatsapp, "enabled", False) else None)
+        instagram = getattr(config.channels, "instagram", None)
+        self.instagram = (InstagramClient.from_env(env)
+                          if getattr(instagram, "enabled", False) else None)
         self.calendar = CalendarClient(config, env)
         self.skills = ""
         self._whatsapp_lock = asyncio.Lock()
+        self._instagram_lock = asyncio.Lock()
 
     @property
     def is_native(self) -> bool:
@@ -481,7 +493,7 @@ class Handler:
             intent = "unsubscribe"
         elif any(p in keyword_text for p in ESCALATION_PATTERNS):
             intent = "escalate"
-        elif channel == "whatsapp":
+        elif channel in CHAT_CHANNELS:
             intent = ""   # one model call decides intent and answer together, below
         else:
             intent = await self._classify_intent(reply_text, prospect, channel)
@@ -501,10 +513,10 @@ class Handler:
         # A WhatsApp chat handed to a human stays theirs: the person's next
         # messages join the same thread and Harvey does not answer them.
         human_turn = False
-        if stored is None and channel == "whatsapp":
+        if stored is None and channel in CHAT_CHANNELS:
             stored = next(
                 (c for c in await self.state.get_conversations_by_status("needs_human")
-                 if c.prospect_id == prospect.id and c.channel == "whatsapp"), None)
+                 if c.prospect_id == prospect.id and c.channel == channel), None)
             human_turn = stored is not None
         if stored is not None:
             convo = stored.model_copy(deep=True)
@@ -538,7 +550,7 @@ class Handler:
             meeting = await self._book(prospect, convo, slot)
             intent = intent or "interested"
             response = self._booked_text(prospect, convo, slot, meeting) if meeting else ""
-            if channel == "whatsapp":
+            if channel in CHAT_CHANNELS:
                 decision = Decision(action="answer", reply=response, intent=intent,
                                     reason="booked a meeting" if meeting else "booking failed")
         elif not intent:
@@ -547,15 +559,15 @@ class Handler:
             if human_turn:
                 intent = "question"          # theirs to answer; Harvey stays out
             else:
-                decision = await self._decide_whatsapp("", reply_text, prospect, convo, arrived)
+                decision = await self._decide_chat("", reply_text, prospect, convo, arrived)
                 intent, response = decision.intent, decision.reply
             logger.info(f"Handler: Intent for {lead_email}: {intent}")
         convo.intent = intent
         convo.stage = "closed_won" if meeting else self._determine_stage(intent, convo.stage, reply_text)
         if (decision is None and slot is None and intent in AUTO_REPLY_INTENTS
                 and not held and not human_turn):
-            if channel == "whatsapp":
-                decision = await self._decide_whatsapp(intent, reply_text, prospect, convo, arrived)
+            if channel in CHAT_CHANNELS:
+                decision = await self._decide_chat(intent, reply_text, prospect, convo, arrived)
                 response = decision.reply
             else:
                 response = await self._generate_response(intent, reply_text, prospect, convo)
@@ -598,9 +610,9 @@ class Handler:
                 agent="handler",
                 details={"prospect_email": lead_email},
             )
-            if channel == "whatsapp":
+            if channel in CHAT_CHANNELS:
                 # One fixed line so they know it worked; never a model's words.
-                await self._queue_whatsapp_reply(
+                await self._queue_chat_reply(
                     WHATSAPP_OPT_OUT_CONFIRMATION, prospect, convo, intent, action="wait",
                     force_auto=True)
             logger.info(f"Handler: {lead_email} opted out. Suppressed permanently.")
@@ -630,7 +642,7 @@ class Handler:
 
         if intent == "ooo":
             logger.info(f"Handler: {lead_email} is OOO. Will follow up later.")
-            if channel == "whatsapp" and decision is not None:
+            if channel in CHAT_CHANNELS and decision is not None:
                 await self.state.log_action(
                     action_type="decision", agent="handler",
                     details={"prospect_phone": prospect.phone, "action": decision.action,
@@ -662,7 +674,7 @@ class Handler:
                 details={"prospect_phone": prospect.phone, "action": "wait",
                          "reason": decision.reason, "reply_preview": reply_text[:200]})
             logger.info(f"Handler: {lead_email} needs no answer ({decision.reason or 'wait'}).")
-            if channel == "whatsapp" and decision.sender != "automatic":
+            if channel in CHAT_CHANNELS and decision.sender != "automatic":
                 # An "ok" or a "." needs no answer, but the chat mustn't just die there.
                 await self._schedule_follow_up(prospect, convo)
             return
@@ -686,8 +698,8 @@ class Handler:
 
         # Send the response — natively through the outbox approval ladder,
         # or immediately via Instantly (legacy).
-        if channel == "whatsapp":
-            await self._queue_whatsapp_reply(response, prospect, convo, intent, decision.action)
+        if channel in CHAT_CHANNELS:
+            await self._queue_chat_reply(response, prospect, convo, intent, decision.action)
             await self.state.log_action(
                 action_type="decision", agent="handler",
                 details={"prospect_phone": prospect.phone, "action": decision.action,
@@ -955,6 +967,90 @@ class Handler:
             logger.info(f"Handler: processed {handled} WhatsApp message(s).")
         return complete
 
+    async def run_instagram(self, comments: bool = False) -> bool:
+        """Read Instagram DMs (and, with `comments`, comments carrying a keyword:
+        a request per post, so only on the heartbeat) and handle each one like a
+        WhatsApp message. Returns True only if all were read and handled."""
+        async with self._instagram_lock:
+            return await self._run_instagram(comments)
+
+    async def _run_instagram(self, comments: bool) -> bool:
+        if self.instagram is None or not self.instagram.is_configured():
+            return True
+        if await instagram_paused(self.state):
+            return True     # the channel is paused, not broken: other sends may go on
+        if not self.skills:
+            self.skills = self.brain.load_skills_for_agent("handler")
+        cfg = self.config.channels.instagram
+        keywords = [k.strip().lower() for k in cfg.comment_keywords if k.strip()]
+        try:
+            inbound = await self.instagram.get_replies()
+            if keywords and comments:
+                inbound += [c for c in await self.instagram.get_comments()
+                            if any(k in c.body.lower() for k in keywords)]
+        except InstagramBlocked as e:
+            await pause_instagram(self.state, self.config, str(e))
+            return True
+        except Exception as e:
+            logger.error(f"Handler: fetching Instagram messages failed: {e}")
+            return False
+
+        handled, complete, now = 0, True, time.time()
+        for msg in inbound:
+            dedup_key = f"{'igc' if msg.comment_id else 'ig'}:{msg.provider_id}"
+            if await self.state.is_reply_processed(dedup_key):
+                continue
+            if not msg.date.isdigit() or now - int(msg.date) > INSTAGRAM_BACKLOG_SECONDS:
+                # The inbox's history on the first run: old news, not leads.
+                await self.state.mark_reply_processed(dedup_key)
+                continue
+            consumed = True
+            try:
+                prospect = await self._instagram_prospect(msg)
+                if prospect:
+                    await self._process_reply(
+                        f"@{msg.username or msg.user_id}", msg.body, reply_uuid="",
+                        prospect=prospect, channel="instagram",
+                        reply_meta={"date": msg.date})
+                    handled += 1
+            except BrainUnavailable as e:
+                consumed = False
+                complete = False
+                logger.error(f"Handler: stopping; Instagram messages are left for later ({e}).")
+                break
+            except Exception as e:
+                logger.error(f"Handler: error processing Instagram from @{msg.username}: {e}")
+                complete = False
+            finally:
+                if consumed:
+                    await self.state.mark_reply_processed(dedup_key)
+        if handled:
+            logger.info(f"Handler: processed {handled} Instagram message(s).")
+        return complete
+
+    async def _instagram_prospect(self, msg):
+        """The prospect behind an Instagram sender. Someone new becomes a lead
+        (unless the account already talked to them: a friend or a customer);
+        a business discovery found under the same @ is theirs."""
+        prospect = await self.state.get_prospect_by_instagram_id(msg.user_id)
+        if prospect or not self.config.channels.instagram.inbound_leads or msg.known_contact:
+            return prospect
+        handle = (msg.username or "").lower()
+        company = (await self.state.get_company_by_external_id(f"instagram:{handle}")
+                   if handle else None)
+        prospect = Prospect(
+            company_id=company.id if company else "",
+            company=company.name if company else (f"@{handle}" if handle else ""),
+            industry=company.industry if company else "",
+            instagram_id=msg.user_id, instagram_handle=handle,
+            source=INBOUND_INSTAGRAM_SOURCE, status="new")
+        prospect.id = await self.state.add_prospect(prospect)
+        await self.state.log_action(
+            action_type="inbound_lead", agent="handler",
+            details={"instagram": handle, "comment": bool(msg.comment_id)})
+        logger.info(f"Handler: new inbound lead from Instagram @{handle}.")
+        return prospect
+
     async def _close_lost(self, prospect, convo, reply_text: str):
         await self.state.update_conversation(convo.id, status="closed", stage="closed_lost")
         if convo.stage != "closed_lost":    # else the stage change was already reported
@@ -964,7 +1060,7 @@ class Handler:
 
     def _portuguese(self, channel: str) -> bool:
         # shortcut: email times are written in English; add an email language setting if needed.
-        return channel == "whatsapp" and "portug" in self.config.channels.whatsapp.language.lower()
+        return channel in CHAT_CHANNELS and "portug" in self.config.channels.whatsapp.language.lower()
 
     async def _offer_slots(self, convo) -> str:
         """The free meeting times as text for the reply, remembered on the
@@ -1047,7 +1143,9 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
                                   sent: int = 0, announce: bool = False) -> str:
         """Nudge them if they stay quiet: `days` they named (calendar days),
         else FOLLOW_UP_BUSINESS_DAYS[sent] working days, always inside
-        business hours. Returns the time, naive UTC."""
+        business hours. Returns the time, naive UTC ("" when none is planned)."""
+        if convo.channel == "instagram":
+            return ""   # a nudge after silence falls outside Meta's 24h reply window
         start = since or datetime.now(timezone.utc)
         if days:
             at = start + timedelta(days=days)
@@ -1083,7 +1181,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
             # and they get a nudge if they stay quiet.
             await self.state.cancel_pending_outbox_for_prospect(prospect.id, reason="replaced by follow-up")
             return {"next": "follow_up", "follow_up_at": await self._due_from(prospect, convo, since)}
-        decision = await self._decide_whatsapp("", last.content, prospect, convo)
+        decision = await self._decide_chat("", last.content, prospect, convo)
         if decision.action == "defer" or (decision.action == "wait" and decision.sender != "automatic"
                                           and decision.intent not in INTENTS_THAT_CLOSE):
             return {"next": "follow_up",
@@ -1093,7 +1191,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
             return {"next": "handoff", "reason": decision.overridden or decision.reason}
         if decision.action == "wait" or not decision.reply:
             return {"next": "wait"}
-        await self._queue_whatsapp_reply(decision.reply, prospect, convo, decision.intent, decision.action)
+        await self._queue_chat_reply(decision.reply, prospect, convo, decision.intent, decision.action)
         return {"next": "reply", "reply": decision.reply}
 
     async def _due_from(self, prospect, convo, since, days: int = 0) -> str:
@@ -1159,7 +1257,7 @@ Did they accept one of these times? Answer with ONLY this JSON: {{"slot": <its n
                 await self.state.update_conversation(convo.id, follow_up_at="")
                 await self._hand_over(prospect, convo, "Roadie Crew could not write the follow-up.")
                 continue
-            await self._queue_whatsapp_reply(text, prospect, convo, "question", action="answer")
+            await self._queue_chat_reply(text, prospect, convo, "question", action="answer")
             await self._schedule_follow_up(prospect, convo, sent=convo.follow_ups + 1)
             done += 1
         return done
@@ -1194,31 +1292,37 @@ Write ONLY the message text."""
                               allowed_prices=(), allowed_links=[])
         return text if gate else ""
 
-    async def _queue_whatsapp_reply(self, response: str, prospect, convo, intent: str,
-                                    action: str = "", force_auto: bool = False):
-        """Route Harvey's WhatsApp reply through the outbox. The approval
-        ladder applies unless replies, or this kind of action, are auto."""
-        cfg = self.config.channels.whatsapp
-        auto = force_auto or cfg.auto_approve_replies or action in cfg.auto_approve_actions
+    async def _queue_chat_reply(self, response: str, prospect, convo, intent: str,
+                                action: str = "", force_auto: bool = False):
+        """Route Harvey's chat reply (WhatsApp or Instagram, by the
+        conversation's channel) through the outbox. The approval ladder
+        applies unless replies, or this kind of action, are auto."""
+        instagram = convo.channel == "instagram"
+        cfg = self.config.channels.instagram if instagram else self.config.channels.whatsapp
+        auto_actions = [] if instagram else cfg.auto_approve_actions
+        auto = force_auto or cfg.auto_approve_replies or action in auto_actions
         require_approval = cfg.require_approval and not auto
+        to = prospect.instagram_id if instagram else prospect.phone
+        client = self.instagram if instagram else self.whatsapp
+        app = "Instagram" if instagram else "WhatsApp"
         item_id = await self.state.add_outbox_item(
             prospect_id=prospect.id,
             conversation_id=convo.id,
             kind="reply",
-            to_email=prospect.phone,
-            subject="WhatsApp",
+            to_email=to,
+            subject=app,
             body=response,
             send_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             status="pending_review" if require_approval else "approved",
-            provider=self.whatsapp.name,
-            channel="whatsapp",
+            provider=client.name if client else convo.channel,
+            channel=convo.channel,
         )
         if item_id:
             mode = "queued for your approval" if require_approval else "queued to send"
-            logger.info(f"Handler: WhatsApp reply to {prospect.phone} {mode} ({intent}).")
+            logger.info(f"Handler: {app} reply to {to} {mode} ({intent}).")
             await self.state.log_action(
                 action_type="reply_queued", agent="handler",
-                details={"prospect_phone": prospect.phone, "intent": intent,
+                details={"prospect_phone": to, "channel": convo.channel, "intent": intent,
                          "response_preview": response[:100]},
             )
 
@@ -1259,7 +1363,7 @@ Write ONLY the message text."""
     def _model_kw(self, channel: str) -> dict:
         """A per-call model override for chat, when one is configured."""
         wa = getattr(self.config.channels, "whatsapp", None)
-        model = getattr(wa, "model", "") if channel == "whatsapp" else ""
+        model = getattr(wa, "model", "") if channel in CHAT_CHANNELS else ""
         return {"model": model} if model else {}
 
     async def _classify_intent(self, reply_text: str, prospect, channel: str = "email") -> str:
@@ -1352,7 +1456,7 @@ Respond with ONLY the category label, nothing else."""
 
         return current_stage
 
-    async def _decide_whatsapp(
+    async def _decide_chat(
         self, intent: str, reply_text: str, prospect, convo: Conversation, arrived: str = ""
     ) -> Decision:
         """The model proposes a decision for this chat; the policy in
@@ -1360,12 +1464,12 @@ Respond with ONLY the category label, nothing else."""
         cfg = self.config.channels.whatsapp
         demo = find_demo(prospect.industry, cfg.demos)
         said = [m.content for m in convo.thread if m.sender == "harvey"]
-        queued = [i["body"] for i in await self.state.get_outbox(channel="whatsapp", limit=500)
+        queued = [i["body"] for i in await self.state.get_outbox(channel=convo.channel, limit=500)
                   if i["prospect_id"] == prospect.id
                   and i["status"] in ("pending_review", "approved", "sending", "sent")]
         demo_sent = bool(demo and any(demo.url in t for t in said + queued))
         timing = _timing_note(arrived, [i.get("sent_at") for i in await self.state.get_outbox(
-            channel="whatsapp", limit=500) if i["prospect_id"] == prospect.id])
+            channel=convo.channel, limit=500) if i["prospect_id"] == prospect.id])
         history = "\n".join(
             f"{'Theo' if m.sender == 'harvey' else 'Cliente'}: {m.content}"
             for m in convo.thread[-8:])
@@ -1380,12 +1484,13 @@ Respond with ONLY the category label, nothing else."""
             demo_line = f'"{demo.label}", but it was already sent: do not send it again'
         else:
             demo_line = f'"{demo.label}" is ready: use {DEMO_TOKEN} for the link'
-        origin = (INBOUND_ORIGIN_NOTE if prospect.source == INBOUND_WHATSAPP_SOURCE and not said else "")
+        origin = (INBOUND_ORIGIN_NOTE if prospect.source in (INBOUND_WHATSAPP_SOURCE, INBOUND_INSTAGRAM_SOURCE)
+                  and not said else "")
         rules = WHATSAPP_DECISION_RULES
         if self.calendar.enabled():
             rules = rules.replace(NO_TIMES_RULE, BOOKING_RULE).replace(
                 "they want to hire, start, meet or talk to someone", "they want to hire or start")
-        prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}, chatting on WhatsApp with a small business. Tone: {persona.tone}. Write in {cfg.language}.
+        prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}, chatting on {"Instagram" if convo.channel == "instagram" else "WhatsApp"} with a small business. Tone: {persona.tone}. Write in {cfg.language}.
 
 ## The lead
 Business: {prospect.company or "unknown"}

@@ -227,7 +227,7 @@ class WhatsAppSender:
             await self.state.queue_prospect_if_unsent(prospect.id)
         return item_id or ""
 
-    async def _draft(self, company, prospect) -> str:
+    async def _draft(self, company, prospect, app: str = "WhatsApp") -> str:
         signals = await self.state.company_signal_codes(company.id)
         facts = [f"- {SIGNAL_FACTS[s]}" for s in signals if s in SIGNAL_FACTS]
         persona, product = self.config.persona, self.config.product
@@ -248,7 +248,7 @@ class WhatsAppSender:
         prompt = f"""You are {persona.name}, {persona.role} at {chat_brand(persona.company)}. Tone: {persona.tone}.
 You sell: {product.name} - {product.description}
 
-Write the FIRST WhatsApp message to the business below, in {self.cfg.language}.
+Write the FIRST {app} message to the business below, in {self.cfg.language}.
 
 Business: {company.name}
 Type: {company.industry or "unknown"}

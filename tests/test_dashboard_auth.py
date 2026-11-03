@@ -384,6 +384,20 @@ def test_imap_and_microsoft_settings_round_trip(authed):
     assert data["m365_authorized"] in (True, False)
 
 
+def test_whatsapp_and_instagram_settings_round_trip(authed):
+    r = authed.post("/api/settings/env", json={
+        "EVOLUTION_API_URL": "https://evo.example.test", "EVOLUTION_INSTANCE": "harvey",
+        "EVOLUTION_API_KEY": "evo-key-7", "INSTAGRAM_USERNAME": "lojinha",
+        "INSTAGRAM_PASSWORD": "ig-pass-8", "SERPER_API_KEY": "serp-9"})
+    assert r.json()["success"]
+    data = authed.get("/api/settings").json()
+    assert (data["evolution_api_url"], data["evolution_instance"]) == ("https://evo.example.test", "harvey")
+    assert data["instagram_username"] == "lojinha" and not data["instagram_sessionid_set"]
+    assert data["evolution_api_key_set"] and data["instagram_password_set"] and data["serper_api_key_set"]
+    dumped = json.dumps(data)
+    assert "evo-key-7" not in dumped and "ig-pass-8" not in dumped and "serp-9" not in dumped
+
+
 def test_a_port_harvey_cannot_parse_is_refused(authed):
     r = authed.post("/api/settings/env", json={"IMAP_PORT": "993 SSL"})
     assert r.status_code == 400 and not dash.ENV_FILE.exists()

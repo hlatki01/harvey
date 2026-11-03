@@ -56,7 +56,7 @@ function Detail({ r, onClose }: { r: OutboxItem; onClose: () => void }) {
         <div className="mb-3 flex items-start gap-2">
           <div className="min-w-0 flex-1">
             <div className="truncate text-[15px] font-semibold">{r.company || r.to_email}</div>
-            <div className="text-[12px] text-text-2">{r.company ? r.to_email + ' · ' : ''}{what(r)} · {r.channel === 'whatsapp' ? 'WhatsApp' : 'Email'}</div>
+            <div className="text-[12px] text-text-2">{r.company ? r.to_email + ' · ' : ''}{what(r)} · {r.channel === 'whatsapp' ? 'WhatsApp' : r.channel === 'instagram' ? 'Instagram' : 'Email'}</div>
           </div>
           <StatusBadge status={r.status} />
           <Button ref={closeBtn} variant="ghost" size="sm" aria-label="Close" onClick={onClose}><X className="size-4" /></Button>
@@ -70,7 +70,7 @@ function Detail({ r, onClose }: { r: OutboxItem; onClose: () => void }) {
         {row('Goes out', r.status === 'approved' ? sends(r) : '')}
         {row('Sent', r.sent_at ? formatDate(r.sent_at) : '')}
         {row('Last change', r.status === 'sent' ? '' : formatDate(r.updated_at))}
-        {r.channel !== 'whatsapp' && row('Subject', r.subject)}
+        {r.channel !== 'whatsapp' && r.channel !== 'instagram' && row('Subject', r.subject)}
         <div className="mt-3 whitespace-pre-wrap break-words rounded-md bg-surface-2 p-3 text-[13px] leading-relaxed">{r.body || <span className="text-text-3">No text.</span>}</div>
       </div>
     </div>

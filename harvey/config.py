@@ -300,10 +300,39 @@ class WhatsAppChannelConfig(BaseModel):
         return v
 
 
+class InstagramChannelConfig(BaseModel):
+    """Instagram DMs through instagrapi, logged in as a real account
+    (.env: INSTAGRAM_SESSIONID or INSTAGRAM_USERNAME + INSTAGRAM_PASSWORD).
+
+    Harvey answers people who write and, when a comment carries one of
+    comment_keywords, DMs the commenter. Businesses the instagram discovery
+    source found get one cold opening each, at most max_cold_per_day (0 turns
+    that off); a business WhatsApp can reach is left to WhatsApp. Language,
+    opt-out line, prices and example sites follow channels.whatsapp.
+    """
+
+    enabled: bool = False
+    require_approval: bool = True
+    auto_approve_replies: bool = False
+    inbound_leads: bool = True       # someone new who writes becomes a lead
+    comment_keywords: list[str] = []  # empty: comments are not answered
+    max_daily_sends: int = 50        # every DM, replies included
+    # Few and slow: a burst of cold DMs is what gets an account blocked.
+    max_cold_per_day: int = 15
+
+    @field_validator("max_daily_sends", "max_cold_per_day")
+    @classmethod
+    def _non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("must be >= 0")
+        return v
+
+
 class ChannelsConfig(BaseModel):
     email: EmailChannelConfig = EmailChannelConfig()
     linkedin: LinkedInChannelConfig = LinkedInChannelConfig()
     whatsapp: WhatsAppChannelConfig = WhatsAppChannelConfig()
+    instagram: InstagramChannelConfig = InstagramChannelConfig()
 
 
 PRECLEARED_ADDRESS_SOURCES = ("published", "bought", "scraped", "given", "unknown")
@@ -825,6 +854,10 @@ class EnvConfig(BaseModel):
     evolution_api_url: str = ""
     evolution_api_key: str = ""
     evolution_instance: str = ""
+    # Instagram via Meta's Graph API (Facebook Login): the linked Page and its token
+    instagram_username: str = ""
+    instagram_password: str = ""
+    instagram_sessionid: str = ""
     reoon_api_key: str = ""
     zerobounce_api_key: str = ""
     # Native mail providers (channels.email.provider: gmail | smtp)
@@ -944,6 +977,9 @@ def load_env() -> EnvConfig:
         evolution_api_url=os.getenv("EVOLUTION_API_URL", "").strip().rstrip("/"),
         evolution_api_key=os.getenv("EVOLUTION_API_KEY", "").strip(),
         evolution_instance=os.getenv("EVOLUTION_INSTANCE", "").strip(),
+        instagram_username=os.getenv("INSTAGRAM_USERNAME", "").strip(),
+        instagram_password=os.getenv("INSTAGRAM_PASSWORD", ""),
+        instagram_sessionid=os.getenv("INSTAGRAM_SESSIONID", "").strip(),
         reoon_api_key=os.getenv("REOON_API_KEY", "").strip(),
         zerobounce_api_key=os.getenv("ZEROBOUNCE_API_KEY", "").strip(),
         gmail_client_id=os.getenv("GMAIL_CLIENT_ID", "").strip(),

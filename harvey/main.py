@@ -45,7 +45,7 @@ CYCLE_TIMEOUT_SECONDS = 600
 QUIET_HOURS_POLL_SECONDS = 300
 
 # Phase-1 tasks that read replies; sending waits for all of them to succeed.
-REPLY_READERS = ("read_replies", "read_whatsapp")
+REPLY_READERS = ("read_replies", "read_whatsapp", "read_instagram")
 
 
 # What the dashboard edits in the config file. Re-read every cycle so a change
@@ -270,6 +270,30 @@ async def whatsapp_live(handler, whatsapp, stop_event: asyncio.Event):
             break
 
 
+# The account is driven like the app: polling every two minutes reads like a
+# person checking their DMs, not a bot hammering the inbox.
+INSTAGRAM_POLL_SECONDS = 120
+
+
+async def instagram_live(handler, instagram, stop_event: asyncio.Event):
+    """Answer Instagram DMs as they happen, like whatsapp_live. Openings are
+    staged by the heartbeat, not here."""
+    failures = 0
+    while not stop_event.is_set():
+        try:
+            await handler.run_instagram()
+            await instagram.run(stage=False)
+            failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            failures += 1
+            logger.error(f"Instagram live loop error (#{failures}): {e}")
+        wait = INSTAGRAM_POLL_SECONDS if not failures else min(INSTAGRAM_POLL_SECONDS * 2 ** failures, 900)
+        if await _interruptible_sleep(wait, stop_event):
+            break
+
+
 async def heartbeat(stop_event: asyncio.Event | None = None):
     """Harvey's main loop. Wakes up, decides, acts, sleeps. Repeat."""
     if stop_event is None:
@@ -314,17 +338,21 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     from harvey.agents.analyst import Analyst
     from harvey.learn import propose_lessons
     from harvey.agents.whatsapp import WhatsAppSender
+    from harvey.agents.instagram import InstagramSender
 
     scout = Scout(brain, state, config, env)
     writer = Writer(brain, state, config, env)
     sender = Sender(brain, state, config, env)
     handler = Handler(brain, state, config, env)
     whatsapp = WhatsAppSender(brain, state, config, env)
+    instagram = InstagramSender(state, config, env, brain=brain)
     analyst = Analyst(state)
 
     beacon = asyncio.create_task(alive_beacon(Path(state.db_path).parent / "harvey.alive", stop_event))
     live = (asyncio.create_task(whatsapp_live(handler, whatsapp, stop_event))
             if whatsapp.is_active else None)
+    ig_live = (asyncio.create_task(instagram_live(handler, instagram, stop_event))
+               if instagram.is_active else None)
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
     consecutive_errors = 0
@@ -422,6 +450,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 tasks.append(("read_whatsapp", handler.run_whatsapp()))
                 tasks.append(("whatsapp_follow_ups", handler.follow_up_due()))
                 send_tasks.append(("send_whatsapp", whatsapp.run))
+            if instagram.is_active:
+                tasks.append(("read_instagram", handler.run_instagram(comments=True)))
+                send_tasks.append(("send_instagram", instagram.run))
 
             # Profiling rides along every cycle. It is three HTTP requests per
             # business with no model call, so it costs nothing against the
@@ -500,6 +531,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
     if live:
         live.cancel()
+    if ig_live:
+        ig_live.cancel()
     beacon.cancel()
     logger.info("Harvey shutting down. Deals don't close themselves, but I need a break.")
 

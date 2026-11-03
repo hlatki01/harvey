@@ -20,10 +20,14 @@ interface SettingsData {
   reoon_api_key_set?: boolean; zerobounce_api_key_set?: boolean; hunter_api_key_set?: boolean
   linkedin_email?: string; linkedin_password_set?: boolean
   cloudflare_account_id?: string; cloudflare_api_token_set?: boolean
+  evolution_api_url?: string; evolution_instance?: string; evolution_api_key_set?: boolean
+  instagram_username?: string; instagram_password_set?: boolean; instagram_sessionid_set?: boolean
+  serper_api_key_set?: boolean
 }
 
 type Form = Record<string, string> & { imapSame: string }
 type Test = { state: 'pending' | 'success' | 'error'; text: string } | null
+type Tested = 'instantly' | 'whatsapp' | 'instagram'
 
 const s = (v: unknown) => (v == null ? '' : String(v))
 
@@ -37,6 +41,8 @@ function initial(d: SettingsData): Form {
     instantlyKey: '', reoon: '', zerobounce: '', hunter: '',
     liEmail: s(d.linkedin_email), liPass: '',
     cfAccount: s(d.cloudflare_account_id), cfToken: '',
+    evoUrl: s(d.evolution_api_url), evoInstance: s(d.evolution_instance), evoKey: '',
+    igUser: s(d.instagram_username), igPass: '', igSession: '', serper: '',
   }
 }
 
@@ -58,7 +64,8 @@ export function IntegrationsPane() {
 function IntegrationsForm({ data, reload }: { data: SettingsData; reload: () => Promise<void> }) {
   const toast = useToast()
   const [f, setF] = useState<Form>(() => initial(data))
-  const [test, setTest] = useState<Test>(null)
+  const [tests, setTests] = useState<Partial<Record<Tested, Test>>>({})
+  const setTest = (k: Tested, t: Test) => setTests(p => ({ ...p, [k]: t }))
   const set = (k: keyof Form & string) => (v: string) => setF(p => ({ ...p, [k]: v }))
 
   async function save(payload: Record<string, string>, okMsg: string, reloadAfter = true) {
@@ -123,12 +130,33 @@ function IntegrationsForm({ data, reload }: { data: SettingsData; reload: () => 
     save(p, 'Cloudflare credentials saved.')
   }
 
-  async function testInstantly() {
-    setTest({ state: 'pending', text: 'Testing…' })
-    const r = await post<{ success?: boolean }>('/api/settings/test-instantly', { api_key: f.instantlyKey.trim() })
-    if (!r) setTest({ state: 'error', text: 'Could not reach the dashboard server.' })
-    else setTest({ state: r.success ? 'success' : 'error', text: failMsg(r, '') })
+  function saveWhatsApp() {
+    const p: Record<string, string> = { EVOLUTION_API_URL: f.evoUrl.trim(), EVOLUTION_INSTANCE: f.evoInstance.trim() }
+    if (f.evoKey.trim()) p.EVOLUTION_API_KEY = f.evoKey.trim()
+    save(p, 'WhatsApp settings saved. Press Test to check the connection.')
   }
+
+  function saveInstagram() {
+    const p: Record<string, string> = { INSTAGRAM_USERNAME: f.igUser.trim() }
+    if (f.igPass) p.INSTAGRAM_PASSWORD = f.igPass
+    if (f.igSession.trim()) p.INSTAGRAM_SESSIONID = f.igSession.trim()
+    save(p, 'Instagram settings saved. Press Test to check the connection.')
+  }
+
+  function saveSerper() {
+    const key = f.serper.trim()
+    if (!key) return need('Enter a new key first. The saved one is kept.')
+    save({ SERPER_API_KEY: key }, 'Serper API key saved.')
+  }
+
+  // WhatsApp and Instagram test what is saved; Instantly tests the key typed in the box.
+  async function runTest(k: Tested, path: string, body: Record<string, string> = {}) {
+    setTest(k, { state: 'pending', text: 'Testing…' })
+    const r = await post<{ success?: boolean }>(path, body)
+    if (!r) setTest(k, { state: 'error', text: 'Could not reach the dashboard server.' })
+    else setTest(k, { state: r.success ? 'success' : 'error', text: failMsg(r, '') })
+  }
+  const result = (k: Tested) => <TestResult test={tests[k] ?? null} />
 
   const gmail = data.gmail_authorized
     ? <StatusChip tone="good">authorized</StatusChip>
@@ -209,17 +237,9 @@ function IntegrationsForm({ data, reload }: { data: SettingsData; reload: () => 
             onChange={set('instantlyKey')}
             isSet={!!data.instantly_api_key_set}
             placeholder="Enter your Instantly API key"
-            extra={<Button onClick={testInstantly}>Test</Button>}
+            extra={<Button onClick={() => runTest('instantly', '/api/settings/test-instantly', { api_key: f.instantlyKey.trim() })}>Test</Button>}
           />
-          {test && (
-            <div
-              role="status"
-              className={cn('mb-3 rounded-md border px-3 py-2 text-[13px]',
-                test.state === 'success' ? 'border-good-line bg-good-bg text-good'
-                  : test.state === 'error' ? 'border-bad-line bg-bad-bg text-bad'
-                    : 'border-line bg-surface-2 text-text-2')}
-            >{test.text}</div>
-          )}
+          {result('instantly')}
           <Button variant="primary" size="sm" onClick={saveInstantly}>Save Instantly</Button>
         </Row>
       </Card>
@@ -237,13 +257,59 @@ function IntegrationsForm({ data, reload }: { data: SettingsData; reload: () => 
         </Row>
       </Card>
 
-      <Subhead>Optional</Subhead>
+      <Subhead hint={<>Turn a channel on with <code className={code}>channels.whatsapp.enabled</code> / <code className={code}>channels.instagram.enabled</code> in <code className={code}>harvey.yaml</code></>}>Chat</Subhead>
       <Card>
+        <Row
+          title={<>WhatsApp{data.evolution_api_key_set && data.evolution_api_url ? <StatusChip tone="good">set</StatusChip> : <StatusChip tone="idle">not set up</StatusChip>}</>}
+          desc={<>Through a self-hosted <a className="text-accent underline" href="https://doc.evolution-api.com" target="_blank" rel="noopener noreferrer">Evolution API</a> instance. Use a dedicated number: cold messages to strangers get numbers banned.</>}
+        >
+          <TextField label="Evolution API URL" value={f.evoUrl} onChange={set('evoUrl')} placeholder="https://evolution.example.com" />
+          <TextField label="Instance name" value={f.evoInstance} onChange={set('evoInstance')} placeholder="harvey" />
+          <SecretInput
+            label="API key" value={f.evoKey} onChange={set('evoKey')} isSet={!!data.evolution_api_key_set}
+            placeholder="Your Evolution API key"
+            extra={<Button onClick={() => runTest('whatsapp', '/api/settings/test-whatsapp')}>Test</Button>}
+          />
+          {result('whatsapp')}
+          <Button variant="primary" size="sm" onClick={saveWhatsApp}>Save WhatsApp</Button>
+        </Row>
+        <Row
+          title={<>Instagram{(data.instagram_username && data.instagram_password_set) || data.instagram_sessionid_set ? <StatusChip tone="good">set</StatusChip> : <StatusChip tone="idle">not set up</StatusChip>}</>}
+          desc={<>DMs, openings to businesses the Instagram source found, and the Instagram discovery source, logged in as a real account through the app's unofficial API. Instagram can challenge or block it: use an account you can afford to lose. When it pushes back, Instagram pauses; press Test after fixing it in the app to resume. The <code className={code}>sessionid</code> cookie from a logged-in browser works instead of the password.</>}
+        >
+          <TextField label="Username" value={f.igUser} onChange={set('igUser')} placeholder="yourbusiness" />
+          <SecretInput
+            label="Password" value={f.igPass} onChange={set('igPass')} isSet={!!data.instagram_password_set}
+            placeholder="The account's password"
+          />
+          <SecretInput
+            label="Session id (optional)" value={f.igSession} onChange={set('igSession')} isSet={!!data.instagram_sessionid_set}
+            placeholder="The browser's sessionid cookie"
+            extra={<Button onClick={() => runTest('instagram', '/api/settings/test-instagram')}>Test</Button>}
+          />
+          {result('instagram')}
+          <Button variant="primary" size="sm" onClick={saveInstagram}>Save Instagram</Button>
+        </Row>
+      </Card>
+
+      <Subhead>Prospecting</Subhead>
+      <Card>
+        <Row
+          title={<>Serper{setChip(data.serper_api_key_set)}</>}
+          desc={<>Google search for discovery. <a className="text-accent underline" href="https://serper.dev" target="_blank" rel="noopener noreferrer">2,500 free searches</a>, no card.</>}
+        >
+          <SecretInput label="API key" value={f.serper} onChange={set('serper')} isSet={!!data.serper_api_key_set} placeholder="Your Serper API key" />
+          <Button variant="primary" size="sm" onClick={saveSerper}>Save Serper</Button>
+        </Row>
         <Row title="LinkedIn" desc="For automated LinkedIn prospecting. Roadie Crew logs in and searches like a human.">
           <TextField label="Email or username" value={f.liEmail} onChange={set('liEmail')} placeholder="your@email.com" />
           <SecretInput label="Password" value={f.liPass} onChange={set('liPass')} isSet={!!data.linkedin_password_set} placeholder="Enter password" autoComplete="new-password" />
           <Button variant="primary" size="sm" onClick={saveLinkedIn}>Save LinkedIn</Button>
         </Row>
+      </Card>
+
+      <Subhead>Crawling</Subhead>
+      <Card>
         <Row title="Cloudflare" desc="Deep website crawling with JavaScript rendering during product training. About $5 a month.">
           <TextField label="Account ID" value={f.cfAccount} onChange={set('cfAccount')} placeholder="Your Cloudflare Account ID" />
           <SecretInput label="API token" value={f.cfToken} onChange={set('cfToken')} isSet={!!data.cloudflare_api_token_set} placeholder="Your Cloudflare API Token" />
@@ -251,5 +317,18 @@ function IntegrationsForm({ data, reload }: { data: SettingsData; reload: () => 
         </Row>
       </Card>
     </div>
+  )
+}
+
+function TestResult({ test }: { test: Test }) {
+  if (!test) return null
+  return (
+    <div
+      role="status"
+      className={cn('mb-3 rounded-md border px-3 py-2 text-[13px]',
+        test.state === 'success' ? 'border-good-line bg-good-bg text-good'
+          : test.state === 'error' ? 'border-bad-line bg-bad-bg text-bad'
+            : 'border-line bg-surface-2 text-text-2')}
+    >{test.text}</div>
   )
 }

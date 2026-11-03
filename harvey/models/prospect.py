@@ -10,9 +10,12 @@ COMPANY_INBOX_SOURCE = "company_inbox"
 # Source tag for a prospect that is a business's own phone line (WhatsApp):
 # no named person, reached through the number the company lists.
 COMPANY_PHONE_SOURCE = "company_phone"
+COMPANY_INSTAGRAM_SOURCE = "company_instagram"   # a business's own Instagram account
 # Someone who wrote to us first on WhatsApp; nothing is known about them yet.
 INBOUND_WHATSAPP_SOURCE = "inbound_whatsapp"
 INBOUND_EMAIL_SOURCE = "inbound_email"
+# Someone who sent an Instagram DM, or commented a keyword, first.
+INBOUND_INSTAGRAM_SOURCE = "inbound_instagram"
 
 
 def _utcnow() -> datetime:
@@ -31,6 +34,8 @@ class Prospect(BaseModel):
     email_status: str = ""
     phone: str = ""
     phone_verified: bool = False
+    instagram_id: str = ""     # Instagram-scoped id: where an Instagram DM goes
+    instagram_handle: str = ""
     linkedin_url: str = ""
     title: str = ""            # required for a valid contact
     seniority: str = ""        # c_suite, vp, director, manager, individual
@@ -70,7 +75,8 @@ class Prospect(BaseModel):
 
     def full_name(self) -> str:
         name = f"{self.first_name} {self.last_name}".strip()
-        if not name and (self.is_company_inbox or self.is_company_phone):
+        if not name and (self.is_company_inbox or self.is_company_phone
+                         or self.source == COMPANY_INSTAGRAM_SOURCE):
             return f"{self.company} team" if self.company else "the team"
         return name
 

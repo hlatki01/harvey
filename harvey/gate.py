@@ -171,6 +171,37 @@ def whatsapp_check(
         if kind == "sequence" and not prospect.phone_verified:
             reasons.append("number was not confirmed to have WhatsApp")
 
+    reasons += _chat_body_reasons(body, kind, opt_out_line, allowed_prices, allowed_links)
+    return GateResult(ok=not reasons, reasons=reasons)
+
+
+def instagram_check(
+    user_id: str,
+    body: str,
+    prospect=None,
+    kind: str = "reply",
+    opt_out_line: str = "",
+    allowed_prices: tuple[str, ...] | list[str] = (),
+    allowed_links: list[str] | None = None,
+) -> GateResult:
+    """The pre-send checks for an Instagram DM.
+
+    opt_out_line: when set, a cold (sequence) message must contain it.
+    """
+    reasons: list[str] = []
+    user_id = (user_id or "").strip()
+    if not user_id.isdigit():
+        reasons.append(f"invalid Instagram recipient '{user_id}'")
+    if prospect is not None and (prospect.instagram_id or "").strip() != user_id:
+        reasons.append("recipient does not match the prospect record")
+    reasons += _chat_body_reasons(body, kind, opt_out_line, allowed_prices, allowed_links)
+    return GateResult(ok=not reasons, reasons=reasons)
+
+
+def _chat_body_reasons(body, kind, opt_out_line, allowed_prices, allowed_links) -> list[str]:
+    """What is wrong with a chat message's text, whatever app carries it."""
+    reasons: list[str] = []
+    body = (body or "").strip()
     if not body:
         reasons.append("empty body")
     words = len(body.split())
@@ -207,5 +238,4 @@ def whatsapp_check(
         reasons.append("opt-out line missing")
     if re.search(r"<\s*(html|body|div|table|img|a)\b", body, re.IGNORECASE):
         reasons.append("HTML markup in body (plain text only)")
-
-    return GateResult(ok=not reasons, reasons=reasons)
+    return reasons

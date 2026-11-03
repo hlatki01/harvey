@@ -115,7 +115,7 @@ function Actions({ c, onStatus, onFollowUp, busy }: {
       <div className={wrap}>
         <span className="mr-auto inline-flex items-center gap-1.5 text-[12px] text-text-2">
           <AlertTriangle className="size-3.5" aria-hidden />
-          {c.channel === 'whatsapp' ? 'Roadie Crew handed this to you. Reply above, then:' : 'Roadie Crew handed this to you. Reply from your inbox, then:'}
+          {c.channel === 'whatsapp' || c.channel === 'instagram' ? 'Roadie Crew handed this to you. Reply above, then:' : 'Roadie Crew handed this to you. Reply from your inbox, then:'}
         </span>
         <Button size="sm" disabled={!!busy} onClick={() => onStatus('open')}>{busy === 'open' ? <><Spin />Handing back</> : 'Hand back to Roadie Crew'}</Button>
         <Button size="sm" disabled={!!busy} onClick={() => onStatus('closed')}>Close</Button>
@@ -158,7 +158,8 @@ export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => 
   const toast = useToast()
   const [lead, setLead] = useState(false)
   const [busy, setBusy] = useState<'' | 'open' | 'closed' | 'follow-up'>('')
-  const wa = c.channel === 'whatsapp'
+  // WhatsApp and Instagram are chats: the real thread, and a reply box.
+  const wa = c.channel === 'whatsapp' || c.channel === 'instagram'
   const chat = useChat(c.id, wa)
   const name = convoName(c)
   const stage = own(STAGE_LABELS, c.stage || '')
@@ -211,7 +212,7 @@ export function ConversationCard({ c, onChanged }: { c: Convo; onChanged: () => 
         </div>
       </div>
       {wa ? <WhatsAppThread c={c} chat={chat} /> : <EmailThread c={c} />}
-      {wa && ['needs_human', 'open'].includes(c.status) && <Composer id={c.id} chat={chat} />}
+      {wa && ['needs_human', 'open'].includes(c.status) && <Composer id={c.id} chat={chat} instagram={c.channel === 'instagram'} />}
       <Actions c={c} onStatus={setStatus} onFollowUp={followUp} busy={busy} />
       {lead && <LeadModal id={c.id} name={[c.first_name, c.last_name].filter(Boolean).join(' ') || 'Lead'} onClose={() => setLead(false)} />}
     </div>

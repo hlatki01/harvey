@@ -392,6 +392,26 @@ Each heartbeat Harvey takes businesses that have a phone and were never tried, a
 
 **Read this before turning it on.** Evolution drives a normal WhatsApp account over the unofficial Web protocol, which breaks WhatsApp's terms, and cold messages to people who do not have you saved are what gets numbers banned. Use a dedicated SIM, keep `max_daily_sends` low and approval on. In Brazil the lawful basis for contacting a business is on you under the LGPD; the first message always says who you are and how to stop. The official WhatsApp Business Platform (templates, per-conversation fees) is the compliant route for messages you start. The Evolution endpoints are checked against mocked responses only, not a live instance.
 
+## Instagram
+
+Instagram runs through [instagrapi](https://github.com/subzeroid/instagrapi): Harvey logs in as a real account and uses the app's private API. It is **unofficial**, so Instagram can challenge, throttle or ban that account, and it breaks when Instagram changes the app. Use an account you can afford to lose. `.env`: `INSTAGRAM_USERNAME` + `INSTAGRAM_PASSWORD`, or `INSTAGRAM_SESSIONID` (the `sessionid` cookie of a logged-in browser), or Settings → Integrations. The login is kept in `data/instagram_session.json` (treat it like the password).
+
+The moment Instagram pushes back (a challenge, "please wait", a logout) every Instagram request stops and you get a push. Fix it in the app, then press **Test** on the Instagram card to resume.
+
+**Finding businesses.** `harvey discover --provider instagram` uses Instagram's own account search for "<term> <city>" and reads each profile: name, bio, website, followers, category and the business phone the app shows. Private accounts and accounts with neither a category nor a phone are skipped. A link-in-bio page (Linktree and the like) is not a website, so Instagram-only businesses land with `NO_WEBSITE`; the phone becomes the company phone, which the WhatsApp channel can use. Signals: `INSTAGRAM_HANDLE`, `INSTAGRAM_FOLLOWERS` (confirm them on the Signals tab). OpenStreetMap's `contact:instagram` tag is recorded too.
+
+**DMs.**
+
+```yaml
+channels:
+  instagram:
+    enabled: true
+    max_cold_per_day: 15        # openings to businesses discovery found; 0 turns them off
+    comment_keywords: [QUERO]   # optional: a comment with one of these gets a DM
+```
+
+DMs and message requests are read every two minutes (no webhook) and handled like WhatsApp replies: the same decision engine, knowledge base, approval queue and opt-outs. Someone new who writes becomes a lead (an account you already talked to is left alone), joined to the company discovery found under the same @. Each business the Instagram source found gets **one** opening, written like the WhatsApp one and carrying the same opt-out line, waiting in the Outbox for approval; a business with a phone goes to WhatsApp first and gets an Instagram opening only when its number has no WhatsApp. Openings go out two per cycle with minutes between them, inside business hours. Text only.
+
 ### Pushes to your phone
 
 Harvey can send what needs you to your own WhatsApp number through the same Evolution instance, so you don't have to keep the dashboard open:

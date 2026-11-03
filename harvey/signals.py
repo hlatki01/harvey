@@ -61,6 +61,26 @@ SIGNAL_CATALOG: list[dict] = [
         "confidence_floor": 0.0,
     },
     {
+        "code": "INSTAGRAM_HANDLE",
+        "label": "On Instagram",
+        "description": "The business's Instagram @ — from its profile or its map listing.",
+        "category": "discovery",
+        "value_type": "text",
+        "collector": "discover",
+        "cost_note": "free (read with the listing or the profile)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "INSTAGRAM_FOLLOWERS",
+        "label": "Instagram followers",
+        "description": "How many people follow the business on Instagram — its reach there.",
+        "category": "discovery",
+        "value_type": "num",
+        "collector": "discover",
+        "cost_note": "free (read with the Instagram profile)",
+        "confidence_floor": 0.0,
+    },
+    {
         "code": "UNCLAIMED_LISTING",
         "label": "Unclaimed Google listing",
         "description": (

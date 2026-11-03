@@ -96,6 +96,7 @@ DATAFORSEO_SANDBOX=                       # any value routes to the free sandbox
 LINKEDIN_EMAIL=  LINKEDIN_PASSWORD=   # LinkedIn prospecting
 CLOUDFLARE_ACCOUNT_ID=  CLOUDFLARE_API_TOKEN=   # deep JS crawling for training
 SERPER_API_KEY=            # web search + discovery (2,500 free, then a $50 prepaid pack)
+INSTAGRAM_USERNAME=  INSTAGRAM_PASSWORD=   # or INSTAGRAM_SESSIONID: Instagram DMs + discovery via instagrapi (unofficial; use a spare account)
 HARVEY_WEBHOOK_SECRET=     # signs stage-change posts to crm.webhook_url (harvey.yaml)
 ```
 
@@ -187,6 +188,7 @@ side by side: what each source does, what it costs, its free tier, and which
 | **DataForSEO Business Listings** | $0.372/1k businesses | $1 credit | Local trades, clinics, contractors. Phone + domain + rating + whether the listing is claimed, and it can filter for businesses with **no website at all**. |
 | **DataForSEO SERP** | $0.0018 a search at depth 30 | $1 credit + free sandbox | Rank as the buying signal. Positions 11-30 are the sweet spot. |
 | **Serper** | ~$0.30-$1.00/1k | 2,500 free, no card | The easiest paid one to try. |
+| **Instagram** | free | an Instagram login; a few hundred profiles a day | Businesses that live on Instagram, often with no website, with the business phone. Unofficial (instagrapi): Instagram can block the account. |
 
 Cities are geocoded automatically (cached forever, one lookup per city), or set
 `icp.geo_coordinates` in harvey.yaml to control the radius:

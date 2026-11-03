@@ -1185,7 +1185,7 @@ async def test_dashboard_chat_and_attachment_endpoints(state, monkeypatch, tmp_p
         channel="whatsapp", status="needs_human", thread=[]))
     client = ChatClient()
     monkeypatch.setattr(dash, "_state", lambda: state)
-    monkeypatch.setattr(dash, "_evolution", lambda: client)
+    monkeypatch.setattr(dash, "_chat_client", lambda channel: (client, None))
 
     async def fake_query(sql, params=()):
         return [{"channel": "whatsapp", "phone": "5511987654321", "pstatus": "replied"}]

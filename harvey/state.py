@@ -549,6 +549,12 @@ MIGRATIONS: list[str] = [
         removed INTEGER NOT NULL DEFAULT 0
     );
     """,
+    # ── v22: Instagram DMs reach a person by their Instagram-scoped id (integrations/instagram.py) ──
+    """
+    ALTER TABLE prospects ADD COLUMN instagram_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE prospects ADD COLUMN instagram_handle TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS idx_prospects_instagram_id ON prospects(instagram_id);
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -892,8 +898,8 @@ class StateManager:
                     email_status, phone, phone_verified, linkedin_url, title,
                     seniority, department, source, source_url, status, score,
                     personalization_notes, company, industry, company_size,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    instagram_id, instagram_handle, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     prospect.id, prospect.company_id,
                     prospect.first_name, prospect.last_name,
@@ -906,6 +912,7 @@ class StateManager:
                     prospect.status, prospect.score,
                     prospect.personalization_notes,
                     prospect.company, prospect.industry, prospect.company_size,
+                    prospect.instagram_id, prospect.instagram_handle,
                     prospect.created_at.isoformat(),
                     prospect.updated_at.isoformat(),
                 ),
@@ -958,13 +965,13 @@ class StateManager:
 
     async def get_whatsapp_sent_kinds(self) -> dict[str, str]:
         """{message id: "team" for what the team sent from the dashboard,
-        else the outbox kind} for every WhatsApp message Harvey sent (from the
-        action log, which outlives the leads and outbox rows it describes)."""
+        else the outbox kind} for every WhatsApp or Instagram message Harvey sent
+        (from the action log, which outlives the leads and outbox rows it describes)."""
         async with self._connect() as db:
             async with db.execute(
                 "SELECT json_extract(details_json, '$.message_id'), "
                 "COALESCE(json_extract(details_json, '$.kind'), '') FROM actions "
-                "WHERE action_type = 'whatsapp_sent'") as cur:
+                "WHERE action_type IN ('whatsapp_sent', 'instagram_sent')") as cur:
                 return {r[0]: r[1] for r in await cur.fetchall() if r[0]}
 
     async def get_whatsapp_sent_ids(self) -> set[str]:
@@ -1045,6 +1052,19 @@ class StateManager:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM prospects WHERE email = ?", (email,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return self._prospect_from_row(row) if row else None
+
+    async def get_prospect_by_instagram_id(self, instagram_id: str) -> Prospect | None:
+        """Look up a prospect by their Instagram-scoped id (what a DM goes to)."""
+        instagram_id = (instagram_id or "").strip()
+        if not instagram_id:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM prospects WHERE instagram_id = ?", (instagram_id,)
             ) as cursor:
                 row = await cursor.fetchone()
                 return self._prospect_from_row(row) if row else None
@@ -1824,6 +1844,34 @@ class StateManager:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(sql, params) as cursor:
+                return [self._company_from_row(r) for r in await cursor.fetchall()]
+
+    async def get_instagram_candidates(self, whatsapp_first: bool, limit: int) -> list[Company]:
+        """Businesses the instagram discovery source found that nobody reached yet.
+
+        Skipped: one with an Instagram prospect already (messaged, unreachable,
+        draft failed: never retried), one WhatsApp reached or ruled out (only
+        "no WhatsApp on that number" lets Instagram try), and an @ that wrote
+        to us first. With `whatsapp_first`, a business with a phone waits until
+        WhatsApp has tried it.
+        """
+        # shortcut: only discovery's own instagram:<handle> companies; an @ seen on
+        # OpenStreetMap (INSTAGRAM_HANDLE) is not contacted. Widen when that's wanted.
+        sql = (
+            "SELECT c.* FROM companies c WHERE c.external_id LIKE 'instagram:%' "
+            "AND NOT EXISTS (SELECT 1 FROM prospects p WHERE p.company_id = c.id "
+            "  AND (p.source = 'company_instagram' "
+            "       OR (p.source = 'company_phone' AND p.status != 'no_whatsapp'))) "
+            "AND NOT EXISTS (SELECT 1 FROM prospects p "
+            "  WHERE p.instagram_handle = substr(c.external_id, 11))"
+        )
+        if whatsapp_first:
+            sql += (" AND (c.phone = '' OR EXISTS (SELECT 1 FROM prospects p "
+                    "WHERE p.company_id = c.id AND p.source = 'company_phone'))")
+        sql += " ORDER BY c.created_at ASC LIMIT ?"
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, (int(limit),)) as cursor:
                 return [self._company_from_row(r) for r in await cursor.fetchall()]
 
     async def signal_counts(self) -> list[dict]:

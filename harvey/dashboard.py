@@ -357,6 +357,8 @@ async def get_settings():
         "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
         "M365_CLIENT_ID", "M365_TENANT_ID",
         "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
+        "EVOLUTION_API_URL", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE",
+        "INSTAGRAM_USERNAME", "INSTAGRAM_PASSWORD", "INSTAGRAM_SESSIONID", "SERPER_API_KEY",
     ]
     for key in all_keys:
         if key not in env_vars:
@@ -396,6 +398,13 @@ async def get_settings():
         "reoon_api_key_set": is_set("REOON_API_KEY"),
         "zerobounce_api_key_set": is_set("ZEROBOUNCE_API_KEY"),
         "hunter_api_key_set": is_set("HUNTER_API_KEY"),
+        "evolution_api_url": env_vars.get("EVOLUTION_API_URL", ""),
+        "evolution_instance": env_vars.get("EVOLUTION_INSTANCE", ""),
+        "evolution_api_key_set": is_set("EVOLUTION_API_KEY"),
+        "instagram_username": env_vars.get("INSTAGRAM_USERNAME", ""),
+        "instagram_password_set": is_set("INSTAGRAM_PASSWORD"),
+        "instagram_sessionid_set": is_set("INSTAGRAM_SESSIONID"),
+        "serper_api_key_set": is_set("SERPER_API_KEY"),
     }
 
 
@@ -416,7 +425,10 @@ async def save_env_settings(request: Request):
                      "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD",
                      "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
                      "M365_CLIENT_ID", "M365_TENANT_ID",
-                     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY"]:
+                     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
+                     "EVOLUTION_API_URL", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE",
+                     "INSTAGRAM_USERNAME", "INSTAGRAM_PASSWORD", "INSTAGRAM_SESSIONID",
+                     "SERPER_API_KEY"]:
             if key in data and data[key] is not None:
                 value = data[key]
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
@@ -701,6 +713,35 @@ async def test_instantly(request: Request):
                 return {"success": False, "message": f"API returned {resp.status_code}. Check your key."}
     except Exception as e:
         return {"success": False, "message": f"Connection failed: {str(e)}"}
+
+
+@app.post("/api/settings/test-whatsapp")
+async def test_whatsapp():
+    """Is the saved Evolution instance reachable and connected?"""
+    from harvey.config import load_env
+    from harvey.integrations.evolution import EvolutionClient
+    # Saving through the dashboard reloads .env into the process, so this sees it.
+    ok, message = await EvolutionClient.from_env(load_env()).test_connection()
+    return {"success": ok, "message": message}
+
+
+@app.post("/api/settings/test-instagram")
+async def test_instagram():
+    """Can the saved login reach the account? A success also resumes a channel
+    Instagram paused (harvey/agents/instagram.py): the human checked it."""
+    from harvey.agents.instagram import PAUSE_KEY
+    from harvey.config import load_env
+    from harvey.integrations.instagram import InstagramClient
+    ok, message = await InstagramClient.from_env(load_env()).test_connection()
+    state = _state()
+    await state.init_db()
+    paused = await state.get_setting(PAUSE_KEY)
+    if ok and paused:
+        await state.delete_setting(PAUSE_KEY)
+        message += " (Instagram resumed)"
+    elif paused:
+        message += f" (paused: {paused})"
+    return {"success": ok, "message": message}
 
 
 # ── Companies ──
@@ -2024,8 +2065,8 @@ async def get_conversations():
 
 @app.post("/api/conversations/{convo_id}/send")
 async def conversation_send(convo_id: str, request: Request):
-    """The team answers a WhatsApp chat from the dashboard. Sent at once, as
-    a person: no model, no outbox. Never to someone who opted out."""
+    """The team answers a WhatsApp or Instagram chat from the dashboard. Sent
+    at once, as a person: no model, no outbox. Never to someone who opted out."""
     try:
         data = await request.json()
     except Exception:
@@ -2033,26 +2074,20 @@ async def conversation_send(convo_id: str, request: Request):
     text = str(data.get("text") or "").strip() if isinstance(data, dict) else ""
     if not text or len(text) > 1500:
         return _refuse("Write a message (up to 1500 characters).")
-    rows = await query_db(
-        "SELECT c.channel, p.phone, p.status AS pstatus FROM conversations c "
-        "LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.id = ?", (convo_id,))
-    if not rows:
-        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
-    row = rows[0]
-    if row["channel"] != "whatsapp" or not row["phone"]:
-        return _refuse("Only WhatsApp chats can be answered here.")
+    row, err = await _chat_of(convo_id)
+    if err:
+        return err
     if row["pstatus"] == "opted_out":
         return _refuse("This person opted out. Nothing can be sent to them.")
-    from harvey.config import load_env
-    from harvey.integrations.evolution import EvolutionClient
     from harvey.models.conversation import Message
-    client = EvolutionClient.from_env(load_env())
-    if not client.is_configured():
-        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
-                            status_code=503)
-    result = await client.send_text(row["phone"], text)
+    client, err = _chat_client(row["channel"])
+    if err:
+        return err
+    app_name = _APP_NAMES[row["channel"]]
+    # Instagram refuses a DM outside its 24h window itself; the error says so.
+    result = await client.send_text(row["to"], text)
     if not result.ok:
-        return JSONResponse({"success": False, "message": f"WhatsApp did not send it: {result.error}"},
+        return JSONResponse({"success": False, "message": f"{app_name} did not send it: {result.error}"},
                             status_code=502)
     state = _state()
     convo = await state.get_conversation(convo_id)
@@ -2060,8 +2095,8 @@ async def conversation_send(convo_id: str, request: Request):
     await state.update_conversation(convo_id, thread_json=convo.thread_json(), status="needs_human",
                                     follow_up_at="")
     await _team_took_over(state, convo.prospect_id)
-    await state.log_action("whatsapp_sent", "dashboard", {
-        "to": row["phone"], "kind": "team", "message_id": result.message_id})
+    await state.log_action(f"{row['channel']}_sent", "dashboard", {
+        "to": row["to"], "kind": "team", "message_id": result.message_id})
     return {"success": True}
 
 
@@ -2087,7 +2122,7 @@ async def _chat_ideas(convo_id: str, ask: str, task: str) -> list[str]:
     brain = Brain(state, config.brain)
     persona = config.persona
     raw = await brain.think_json(
-        f"""You help the team of {chat_brand(persona.company)} answer a small business on WhatsApp. Tone: {persona.tone}. Write in {wa.language}.
+        f"""You help the team of {chat_brand(persona.company)} answer a small business on {_APP_NAMES.get(convo.channel, "WhatsApp")}. Tone: {persona.tone}. Write in {wa.language}.
 
 ## The lead
 Business: {getattr(prospect, "company", "") or "unknown"}
@@ -2104,7 +2139,7 @@ Example sites (the only links you may use): {demos}
 {brain.load_skill("whatsapp_outreach")}
 
 {ask}
-Short, like a person on WhatsApp, no greeting if the chat is already going.
+Short, like a person on {_APP_NAMES.get(convo.channel, "WhatsApp")}, no greeting if the chat is already going.
 Never invent prices or facts not in the knowledge base.""",
         agent="dashboard", task=task, **({"model": wa.model} if wa.model else {}))
     items = raw.get("suggestions") if isinstance(raw, dict) else None
@@ -2121,7 +2156,7 @@ async def conversation_suggest(convo_id: str, request: Request):
     except Exception:
         data = {}
     draft = str(data.get("draft") or "").strip()[:1500] if isinstance(data, dict) else ""
-    row, err = await _whatsapp_chat_of(convo_id)
+    row, err = await _chat_of(convo_id)
     if err:
         return err
     if draft:
@@ -2139,24 +2174,36 @@ async def conversation_suggest(convo_id: str, request: Request):
     return {"success": True, "suggestions": suggestions}
 
 
-async def _whatsapp_chat_of(convo_id: str):
-    """(phone, prospect status) of a WhatsApp conversation, or an error response."""
+_APP_NAMES = {"whatsapp": "WhatsApp", "instagram": "Instagram"}
+
+
+async def _chat_of(convo_id: str, apps: tuple[str, ...] = ("whatsapp", "instagram")):
+    """(row, None) for a chat conversation on one of `apps`, or (None, an
+    error response). row: channel, to (phone or Instagram id), phone, pstatus."""
     rows = await query_db(
-        "SELECT c.channel, p.phone, p.status AS pstatus FROM conversations c "
+        "SELECT c.channel, p.phone, p.instagram_id, p.status AS pstatus FROM conversations c "
         "LEFT JOIN prospects p ON p.id = c.prospect_id WHERE c.id = ?", (convo_id,))
     if not rows:
         return None, JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
-    row = rows[0]
-    if row["channel"] != "whatsapp" or not row["phone"]:
-        return None, _refuse("Only WhatsApp chats work here.")
+    row = dict(rows[0])
+    row["to"] = row.get("instagram_id") if row["channel"] == "instagram" else row.get("phone")
+    if row["channel"] not in apps or not row["to"]:
+        return None, _refuse(f"Only {' or '.join(_APP_NAMES[a] for a in apps)} chats work here.")
     return row, None
 
 
-def _evolution():
+def _chat_client(channel: str):
+    """(client, None) for the app this chat is on, or (None, an error response)."""
     from harvey.config import load_env
-    from harvey.integrations.evolution import EvolutionClient
-    client = EvolutionClient.from_env(load_env())
-    return client if client.is_configured() else None
+    if channel == "instagram":
+        from harvey.integrations.instagram import InstagramClient
+        client, what = InstagramClient.from_env(load_env()), "Instagram"
+    else:
+        from harvey.integrations.evolution import EvolutionClient
+        client, what = EvolutionClient.from_env(load_env()), "WhatsApp (Evolution)"
+    if client.is_configured():
+        return client, None
+    return None, JSONResponse({"success": False, "message": f"{what} is not configured."}, status_code=503)
 
 
 _TIMELINE_ACTIONS = ("decision", "handoff", "escalation", "inbound_lead", "opt_out", "human_turn",
@@ -2268,17 +2315,16 @@ async def campaign_prospect(campaign_id: str, prospect_id: str):
 
 @app.get("/api/conversations/{convo_id}/chat")
 async def conversation_chat(convo_id: str, limit: int = 30, before: int = 0):
-    """The real WhatsApp chat (both directions, media included), newest
-    `limit` messages older than `before` (epoch seconds), oldest first."""
-    row, err = await _whatsapp_chat_of(convo_id)
+    """The real chat on WhatsApp or Instagram (both directions; WhatsApp media
+    included), newest `limit` messages older than `before` (epoch seconds), oldest first."""
+    row, err = await _chat_of(convo_id)
     if err:
         return err
-    client = _evolution()
-    if client is None:
-        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
-                            status_code=503)
+    client, err = _chat_client(row["channel"])
+    if err:
+        return err
     try:
-        messages, more = await client.get_chat(row["phone"], limit=max(1, min(limit, 60)), before=max(before, 0))
+        messages, more = await client.get_chat(row["to"], limit=max(1, min(limit, 60)), before=max(before, 0))
     except Exception as e:
         return JSONResponse({"success": False, "message": f"Could not read the chat: {e}"}, status_code=502)
     kinds = await _state().get_whatsapp_sent_kinds()
@@ -2293,13 +2339,12 @@ async def conversation_chat(convo_id: str, limit: int = 30, before: int = 0):
 async def conversation_media(convo_id: str, message_id: str):
     """One attachment of this chat (never one from another chat)."""
     from fastapi.responses import Response
-    row, err = await _whatsapp_chat_of(convo_id)
+    row, err = await _chat_of(convo_id, apps=("whatsapp",))
     if err:
         return err
-    client = _evolution()
-    if client is None:
-        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
-                            status_code=503)
+    client, err = _chat_client("whatsapp")
+    if err:
+        return err
     try:
         recent, _ = await client.get_chat(row["phone"], limit=60)
         known = {m["id"] for m in recent}
@@ -2341,15 +2386,14 @@ async def conversation_react(convo_id: str, request: Request):
     message_id, emoji = str(data.get("message_id") or ""), str(data.get("emoji") or "")
     if not message_id or (emoji and emoji not in REACTIONS):
         return _refuse("Pick one of the reactions offered.", 400)
-    row, err = await _whatsapp_chat_of(convo_id)
+    row, err = await _chat_of(convo_id, apps=("whatsapp",))
     if err:
         return err
     if row["pstatus"] == "opted_out":
         return _refuse("This person opted out. Nothing can be sent to them.")
-    client = _evolution()
-    if client is None:
-        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
-                            status_code=503)
+    client, err = _chat_client("whatsapp")
+    if err:
+        return err
     try:
         target = await _chat_message(client, row["phone"], message_id)
     except Exception as e:
@@ -2388,15 +2432,14 @@ async def conversation_attach(convo_id: str, request: Request):
         base64.b64decode(b64, validate=True)
     except Exception:
         return _refuse("That file could not be read.", 400)
-    row, err = await _whatsapp_chat_of(convo_id)
+    row, err = await _chat_of(convo_id, apps=("whatsapp",))
     if err:
         return err
     if row["pstatus"] == "opted_out":
         return _refuse("This person opted out. Nothing can be sent to them.")
-    client = _evolution()
-    if client is None:
-        return JSONResponse({"success": False, "message": "WhatsApp (Evolution) is not configured."},
-                            status_code=503)
+    client, err = _chat_client("whatsapp")
+    if err:
+        return err
     result = await client.send_media(row["phone"], filename, mimetype, b64, caption)
     if not result.ok:
         return JSONResponse({"success": False, "message": f"WhatsApp did not send it: {result.error}"},
