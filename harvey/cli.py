@@ -502,6 +502,40 @@ def cmd_whatsapp(args):
     asyncio.run(_test())
 
 
+def cmd_instagram(args):
+    """Instagram utilities: log in through a browser window, store a sessionid, test."""
+    from harvey.config import load_env
+    from harvey.integrations import instagram
+    from harvey.state import DB_PATH, StateManager
+
+    if args.instagram_action == "set-session":
+        # Reads the sessionid from stdin, so it never lands in shell history or ps.
+        asyncio.run(instagram.save_sessionid(StateManager(), sys.stdin.read()))
+        print("  ✓ Instagram sessionid saved. Press Test in Settings → Integrations.")
+        return
+
+    if args.instagram_action == "login":
+        print("\n  Log in to Instagram in the window that opens (10 minutes)...")
+        sid = instagram.browser_sessionid()
+        if not sid:
+            print("  ✗ No login seen; nothing saved.\n")
+            sys.exit(1)
+        if args.ssh:
+            # A server has no screen: the browser runs here, the session goes there.
+            remote = f"docker exec -i {args.container} python -m harvey instagram set-session"
+            r = subprocess.run(["ssh", args.ssh, remote], input=sid, text=True)
+            sys.exit(r.returncode)
+        asyncio.run(instagram.save_sessionid(StateManager(), sid))
+        print("  ✓ Instagram sessionid saved.")
+
+    async def _test():
+        client = instagram.InstagramClient.from_env(load_env(), db_file=DB_PATH)
+        ok, detail = await client.test_connection()
+        print(f"\n  {'✓' if ok else '✗'} {detail}\n")
+        sys.exit(0 if ok else 1)
+    asyncio.run(_test())
+
+
 def cmd_notify(args):
     """Send a test push to notify.whatsapp_number."""
     from harvey.config import load_config, load_env
@@ -966,6 +1000,17 @@ def main():
     sub.add_argument("gmail_action", choices=["auth", "test"],
                      help="auth: one-time OAuth; test: verify connection")
     sub.set_defaults(func=cmd_gmail)
+
+    # harvey instagram login|set-session|test
+    sub = subparsers.add_parser("instagram", help="Instagram login (browser window) and test")
+    sub.add_argument("instagram_action", choices=["login", "set-session", "test"],
+                     help="login: log in in a browser window and save the session; "
+                          "set-session: read a sessionid from stdin; test: verify the login")
+    sub.add_argument("--ssh", default="", metavar="HOST",
+                     help="login: save the session on this server (Harvey in Docker) instead of here")
+    sub.add_argument("--container", default="harvey-harvey-1",
+                     help="login --ssh: the Harvey container (default harvey-harvey-1)")
+    sub.set_defaults(func=cmd_instagram)
 
     # harvey whatsapp test
     sub = subparsers.add_parser("whatsapp", help="WhatsApp (Evolution API) setup")

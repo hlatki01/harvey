@@ -85,6 +85,41 @@ def _patch_password_key():
     PasswordMixin.password_publickeys = password_publickeys
 
 
+def browser_sessionid(timeout_seconds: int = 600) -> str:
+    """Open instagram.com in a real browser window, let the person log in, and
+    return the sessionid cookie it sets ("" when nobody logged in in time).
+    Instagram refuses password logins from a server (needs_upgrade,
+    FakeIncorrectPassword); a person logging in a browser is not refused."""
+    import time
+    from playwright.sync_api import sync_playwright
+
+    sid = ""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        ctx = browser.new_context(locale="pt-BR")
+        page = ctx.new_page()
+        page.goto("https://www.instagram.com/accounts/login/")
+        deadline = time.time() + timeout_seconds
+        while not sid and time.time() < deadline:
+            sid = next((c["value"] for c in ctx.cookies("https://www.instagram.com")
+                        if c["name"] == "sessionid" and c["value"]), "")
+            if not sid:
+                page.wait_for_timeout(1000)
+        browser.close()   # closing is not logging out: the session stays valid
+    return sid
+
+
+async def save_sessionid(state, sessionid: str):
+    """Store a sessionid where InstagramClient reads it, and drop the saved
+    session, which belongs to the previous login."""
+    sessionid = sessionid.strip()
+    if not sessionid or any(ch.isspace() for ch in sessionid) or len(sessionid) > 500:
+        raise ValueError("that is not an Instagram sessionid")
+    await state.init_db()
+    await state.set_setting("instagram_sessionid", sessionid)
+    (Path(state.db_path).parent / SESSION_FILE.name).unlink(missing_ok=True)
+
+
 @dataclass
 class InstagramInbound:
     provider_id: str      # message id (DM) or comment id, used for dedup

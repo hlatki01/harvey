@@ -275,7 +275,7 @@ function IntegrationsForm({ data, reload }: { data: SettingsData; reload: () => 
         </Row>
         <Row
           title={<>Instagram{(data.instagram_username && data.instagram_password_set) || data.instagram_sessionid_set ? <StatusChip tone="good">set</StatusChip> : <StatusChip tone="idle">not set up</StatusChip>}</>}
-          desc={<>DMs, openings to businesses the Instagram source found, and the Instagram discovery source, logged in as a real account through the app's unofficial API. Instagram can challenge or block it: use an account you can afford to lose. When it pushes back, Instagram pauses; press Test after fixing it in the app to resume. The <code className={code}>sessionid</code> cookie from a logged-in browser works instead of the password.</>}
+          desc={<>DMs, openings to businesses the Instagram source found, and the Instagram discovery source, logged in as a real account through the app's unofficial API. Instagram can challenge or block it: use an account you can afford to lose. When it pushes back, Instagram pauses; press Test after fixing it in the app to resume. Instagram usually refuses a password login from a server: run <code className={code}>harvey instagram login</code> on your computer (add <code className={code}>--ssh &lt;server&gt;</code> when Harvey runs there), log in in the window it opens, and the session is saved here. Pasting the browser's <code className={code}>sessionid</code> cookie works too.</>}
         >
           <TextField label="Username" value={f.igUser} onChange={set('igUser')} placeholder="yourbusiness" />
           <SecretInput

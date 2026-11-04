@@ -277,6 +277,7 @@ harvey outbox                # Review queued emails; --approve <id> / --approve-
 harvey signals               # The signal vocabulary; --confirm / --reject CODES (or 'free' / 'all')
 harvey discover              # Find businesses; --providers / --estimate / --provider <key>
 harvey sending pause|resume  # Kill switch for all outbound
+harvey instagram login       # Log in to Instagram in a browser window; --ssh <host> saves it on a server
 harvey notify test           # Test push to notify.whatsapp_number (hot leads, hand-offs, approvals, pauses)
 harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp
 ```

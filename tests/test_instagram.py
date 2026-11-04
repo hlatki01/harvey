@@ -358,3 +358,18 @@ async def test_disabled_channel_reads_nothing(state):
     config.channels.instagram.enabled = False
     handler = Handler(StubBrain(), state, config, EnvConfig(instagram_sessionid="x" * 40))
     assert handler.instagram is None and await handler.run_instagram() is True
+
+
+@pytest.mark.asyncio
+async def test_a_browser_sessionid_is_saved_where_the_client_reads_it(tmp_path):
+    from harvey.integrations.instagram import save_sessionid
+    db = tmp_path / "harvey.db"
+    old_session = tmp_path / "instagram_session.json"
+    old_session.write_text("{}")
+    await save_sessionid(StateManager(db_path=str(db)), "  123%3Aabc%3A9  \n")
+    client = InstagramClient(db_file=db, session_file=tmp_path / "s.json")
+    assert client._login_values() == ("", "", "123%3Aabc%3A9") and client.is_configured()
+    assert not old_session.exists()   # the old login's session is dropped
+    for bad in ("", "a b", "x" * 600):
+        with pytest.raises(ValueError):
+            await save_sessionid(StateManager(db_path=str(db)), bad)
