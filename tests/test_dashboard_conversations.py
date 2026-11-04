@@ -257,3 +257,16 @@ def test_preview_writes_the_follow_up_without_storing_it(client, monkeypatch):
     r = client.post("/api/conversations/cw/follow-up/preview").json()
     assert r == {"success": True, "text": "Oi! Conseguiu ver com o proprietário?"}
     assert [row[0] for row in _outbox(client.db_path)] == ["old"]
+
+
+def test_an_instagram_dm_shows_the_handle_not_the_user_id(client):
+    db = client.db_path
+    asyncio.run(StateManager(str(db)).init_db())
+    _sql(db, "INSERT INTO prospects (id, status, company, instagram_id, instagram_handle) "
+             "VALUES ('pi', 'queued', 'Veylo', '245641', 'veylo.live')")
+    _sql(db, "INSERT INTO outbox (id, prospect_id, kind, step, to_email, subject, body, status, send_at, "
+             "channel) VALUES ('oi', 'pi', 'sequence', 1, '245641', 'Instagram', 'oi', 'pending_review', "
+             "'2026-10-30', 'instagram')")
+    [pending] = client.get("/api/outbox").json()["pending"]
+    assert pending["recipient"] == "@veylo.live" and pending["to_email"] == "245641"
+    assert pending["context"]["company"] == "Veylo"

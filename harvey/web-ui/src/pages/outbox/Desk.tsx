@@ -53,7 +53,7 @@ export function Rail({ items, index, onGo }: { items: OutboxItem[]; index: numbe
   return (
     <Card flush className="max-h-[70vh] overflow-y-auto p-1 max-lg:max-h-60">
       {items.map((it, n) => {
-        const who = it.context?.contact || it.to_email
+        const who = it.context?.contact || it.context?.company || it.recipient || it.to_email
         const [a, b] = String(who || '').split(/[\s@.]+/)
         return (
           <button key={it.id} type="button" onClick={() => onGo(n)} aria-current={n === index || undefined}
@@ -80,11 +80,11 @@ export function Pane({ cur, index, total, footer, edit, busy, onAct, onEdit, onC
   onCancel: () => void
 }) {
   // Cold email leaves with the footer underneath; show it as it will go out.
-  const added = cur.kind === 'sequence' && cur.channel !== 'whatsapp' && !(cur.body || '').trimEnd().endsWith(footer) ? footer : ''
+  const added = cur.kind === 'sequence' && (cur.channel || 'email') === 'email' && !(cur.body || '').trimEnd().endsWith(footer) ? footer : ''
   return (
     <Card className="min-w-0 p-6">
       <div className="flex flex-wrap items-center gap-2 text-[13px] text-text-2 [overflow-wrap:anywhere]">
-        <span>To <b className="font-medium text-text">{cur.to_email}</b></span>
+        <span>To <b className="font-medium text-text">{cur.recipient || cur.to_email}</b></span>
         <span className="rounded-xs bg-surface-2 px-1.5 text-[11px]">{cur.kind === 'reply' ? 'Reply' : 'Email ' + cur.step}</span>
         <span className="text-text-3">{cur.sends_from ? `sends from ${formatDate(cur.sends_from)}` : `sends ${formatDate(cur.send_at)}`}</span>
       </div>

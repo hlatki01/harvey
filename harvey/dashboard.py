@@ -1474,7 +1474,7 @@ async def _with_context(items: list[dict]) -> list[dict]:
 
     people = {r["id"]: r for r in (await query_db(
         "SELECT p.id, p.first_name, p.last_name, p.title, p.source, p.email_status, "
-        "p.score, p.personalization_notes, p.company_id, c.name AS company_name, "
+        "p.score, p.personalization_notes, p.company_id, p.instagram_handle, COALESCE(c.name, p.company) AS company_name, "
         "c.domain, c.website, c.description, c.industry AS found_by "
         "FROM prospects p LEFT JOIN companies c ON c.id = p.company_id "
         f"WHERE p.id IN ({_in(pids)})", tuple(pids)) if pids else [])}
@@ -1519,6 +1519,9 @@ async def _with_context(items: list[dict]) -> list[dict]:
 
     for item in items:
         p = people.get(item.get("prospect_id")) or {}
+        # An Instagram DM goes to a numeric user id: show the @ instead.
+        item["recipient"] = (f"@{p['instagram_handle']}" if item.get("channel") == "instagram"
+                             and p.get("instagram_handle") else item.get("to_email", ""))
         item["context"] = {
             "campaign": campaigns.get(item.get("campaign_id"), ""),
             "company": p.get("company_name", ""),
@@ -1593,7 +1596,9 @@ async def outbox_list(group: str = "approved", q: str = "", page: int = 1):
     total = counted[0]["n"] if counted else 0   # no database yet
     page = max(1, page)
     rows = await query_db(
-        f"SELECT o.*, p.company AS company {base} ORDER BY {order} LIMIT ? OFFSET ?",
+        f"SELECT o.*, p.company AS company, CASE WHEN o.channel = 'instagram' "
+        f"AND COALESCE(p.instagram_handle, '') != '' THEN '@' || p.instagram_handle "
+        f"ELSE o.to_email END AS recipient {base} ORDER BY {order} LIMIT ? OFFSET ?",
         params + (OUTBOX_PAGE, (page - 1) * OUTBOX_PAGE))
     if group == "approved":
         _add_sends_from(rows)

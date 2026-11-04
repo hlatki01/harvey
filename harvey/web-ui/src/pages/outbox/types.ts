@@ -15,6 +15,7 @@ export interface DeskContext {
 export interface OutboxItem {
   id: string
   to_email: string
+  recipient?: string        // what to show for to_email: an Instagram DM's @, not its user id
   subject?: string
   body?: string
   step?: number | string

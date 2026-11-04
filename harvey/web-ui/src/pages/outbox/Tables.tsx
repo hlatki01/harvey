@@ -38,7 +38,7 @@ function sends(r: OutboxItem) {
   return overdue ? 'Overdue · next in line' : formatDate(r.send_at)
 }
 
-const who = (r: OutboxItem) => r.company ? `${r.company} · ${r.to_email}` : r.to_email
+const who = (r: OutboxItem) => r.company ? `${r.company} · ${r.recipient || r.to_email}` : r.recipient || r.to_email
 const what = (r: OutboxItem) => r.kind === 'reply' ? 'Reply' : r.step && Number(r.step) > 1 ? `Follow-up ${Number(r.step) - 1}` : 'Opening'
 
 function Detail({ r, onClose }: { r: OutboxItem; onClose: () => void }) {
@@ -55,8 +55,8 @@ function Detail({ r, onClose }: { r: OutboxItem; onClose: () => void }) {
       <div role="dialog" aria-modal="true" aria-label={'Message to ' + who(r)} className="max-h-[85vh] w-full max-w-[560px] overflow-y-auto rounded-lg bg-surface p-5 shadow-pop">
         <div className="mb-3 flex items-start gap-2">
           <div className="min-w-0 flex-1">
-            <div className="truncate text-[15px] font-semibold">{r.company || r.to_email}</div>
-            <div className="text-[12px] text-text-2">{r.company ? r.to_email + ' · ' : ''}{what(r)} · {r.channel === 'whatsapp' ? 'WhatsApp' : r.channel === 'instagram' ? 'Instagram' : 'Email'}</div>
+            <div className="truncate text-[15px] font-semibold">{r.company || r.recipient || r.to_email}</div>
+            <div className="text-[12px] text-text-2">{r.company ? (r.recipient || r.to_email) + ' · ' : ''}{what(r)} · {r.channel === 'whatsapp' ? 'WhatsApp' : r.channel === 'instagram' ? 'Instagram' : 'Email'}</div>
           </div>
           <StatusBadge status={r.status} />
           <Button ref={closeBtn} variant="ghost" size="sm" aria-label="Close" onClick={onClose}><X className="size-4" /></Button>
