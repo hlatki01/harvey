@@ -5,9 +5,12 @@ library breaks when the app changes. Every such answer becomes
 InstagramBlocked, and the callers pause the whole channel (agents/instagram.py)
 instead of insisting. Use an account you can afford to lose.
 
-Login: INSTAGRAM_SESSIONID (the browser's `sessionid` cookie) or
-INSTAGRAM_USERNAME + INSTAGRAM_PASSWORD. The session is kept in
-data/instagram_session.json so the password is used once, not every poll.
+Login: the browser's `sessionid` cookie, or username + password, saved from
+Settings → Integrations into the database's settings table (LOGIN_KEYS); the
+INSTAGRAM_SESSIONID / INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD env vars are the
+fallback. Read on every use, so a login saved while Harvey runs is picked up.
+The session is kept in data/instagram_session.json so the password is used
+once, not every poll.
 
 Everything is polled, like Evolution: Harvey needs no inbound endpoint.
 instagrapi is synchronous, so each call runs in a worker thread, one at a time.
@@ -16,6 +19,8 @@ instagrapi is synchronous, so each call runs in a worker thread, one at a time.
 import asyncio
 import logging
 import re
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
@@ -25,6 +30,22 @@ from harvey.integrations.mail_provider import SendResult
 logger = logging.getLogger("harvey.instagram")
 
 SESSION_FILE = Path("data") / "instagram_session.json"
+# settings-table keys the dashboard saves the login under
+LOGIN_KEYS = ("instagram_username", "instagram_password", "instagram_sessionid")
+
+
+def saved_login(db_file: Path | str) -> dict[str, str]:
+    """The login saved from the dashboard, {key: value}; {} when there is none."""
+    db_file = Path(db_file)
+    if not db_file.is_file():
+        return {}
+    try:
+        with closing(sqlite3.connect(f"{db_file.resolve().as_uri()}?mode=ro", uri=True, timeout=5)) as db:
+            rows = db.execute("SELECT key, value FROM settings WHERE key IN (?, ?, ?)",
+                              LOGIN_KEYS).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {k: v for k, v in rows if v}
 
 
 class InstagramBlocked(RuntimeError):
@@ -79,21 +100,29 @@ class InstagramClient:
     name = "instagram"
 
     def __init__(self, username: str = "", password: str = "", sessionid: str = "",
-                 session_file: Path | str = SESSION_FILE, api=None):
-        self.username = (username or "").strip()
-        self.password = password or ""
-        self.sessionid = (sessionid or "").strip()
+                 session_file: Path | str = SESSION_FILE, api=None, db_file: Path | str | None = None):
+        self._env = {"instagram_username": (username or "").strip(), "instagram_password": password or "",
+                     "instagram_sessionid": (sessionid or "").strip()}
         self.session_file = Path(session_file)
+        # The database next to the session file: the dashboard saves the login there.
+        self.db_file = Path(db_file) if db_file else self.session_file.parent / "harvey.db"
         self._api = api          # an instagrapi Client (tests pass a fake)
         self._lock = asyncio.Lock()
 
     @classmethod
-    def from_env(cls, env) -> "InstagramClient":
-        return cls(env.instagram_username, env.instagram_password, env.instagram_sessionid)
+    def from_env(cls, env, db_file: Path | str | None = None) -> "InstagramClient":
+        return cls(env.instagram_username, env.instagram_password, env.instagram_sessionid,
+                   db_file=db_file)
+
+    def _login_values(self) -> tuple[str, str, str]:
+        """(username, password, sessionid): the dashboard's when it saved any, else the env's."""
+        src = saved_login(self.db_file) or self._env
+        return (src.get("instagram_username", "").strip(), src.get("instagram_password", ""),
+                src.get("instagram_sessionid", "").strip())
 
     def is_configured(self) -> bool:
-        return bool(self._api or self.sessionid or (self.username and self.password)
-                    or self.session_file.exists())
+        username, password, sessionid = self._login_values()
+        return bool(self._api or sessionid or (username and password) or self.session_file.exists())
 
     # ── plumbing ──
 
@@ -105,12 +134,13 @@ class InstagramClient:
         _patch_password_key()
         api = Client()
         api.delay_range = [1, 3]     # pause between requests, like a person
+        username, password, sessionid = self._login_values()
         if self.session_file.exists():
             api.load_settings(self.session_file)
-        if self.sessionid:
-            api.login_by_sessionid(self.sessionid)
-        elif self.username and self.password:
-            api.login(self.username, self.password)   # reuses the saved session when it's valid
+        if sessionid:
+            api.login_by_sessionid(sessionid)
+        elif username and password:
+            api.login(username, password)   # reuses the saved session when it's valid
         elif not self.session_file.exists():
             raise RuntimeError("set INSTAGRAM_SESSIONID or INSTAGRAM_USERNAME + INSTAGRAM_PASSWORD")
         self.session_file.parent.mkdir(parents=True, exist_ok=True)

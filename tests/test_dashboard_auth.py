@@ -396,6 +396,14 @@ def test_whatsapp_and_instagram_settings_round_trip(authed):
     assert data["evolution_api_key_set"] and data["instagram_password_set"] and data["serper_api_key_set"]
     dumped = json.dumps(data)
     assert "evo-key-7" not in dumped and "ig-pass-8" not in dumped and "serp-9" not in dumped
+    # The Instagram login goes to the database, not .env, and the client reads it there.
+    assert "INSTAGRAM" not in dash.ENV_FILE.read_text()
+    from harvey.integrations.instagram import InstagramClient
+    client = InstagramClient(db_file=dash.DB_PATH)
+    assert client.is_configured() and client._login_values() == ("lojinha", "ig-pass-8", "")
+    # A blank password field keeps the saved one.
+    assert authed.post("/api/settings/env", json={"INSTAGRAM_USERNAME": "lojinha"}).json()["success"]
+    assert authed.get("/api/settings").json()["instagram_password_set"]
 
 
 def test_a_port_harvey_cannot_parse_is_refused(authed):

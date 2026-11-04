@@ -363,6 +363,12 @@ async def get_settings():
     for key in all_keys:
         if key not in env_vars:
             env_vars[key] = os.getenv(key, "")
+    # The Instagram login lives in the database (integrations/instagram.py).
+    from harvey.integrations.instagram import saved_login
+    saved = saved_login(DB_PATH)
+    if saved:
+        for key in INSTAGRAM_LOGIN_FIELDS:
+            env_vars[key] = saved.get(key.lower(), "")
 
     def is_set(k):
         return bool((env_vars.get(k) or "").strip())
@@ -408,9 +414,34 @@ async def get_settings():
     }
 
 
+INSTAGRAM_LOGIN_FIELDS = ("INSTAGRAM_USERNAME", "INSTAGRAM_PASSWORD", "INSTAGRAM_SESSIONID")
+
+
+async def _save_instagram_login(updates: dict):
+    """Into the settings table, not .env (prod's .env is read-only). A changed
+    login drops the saved session, which belongs to the old one."""
+    from harvey.integrations.instagram import saved_login
+    state = _state()
+    await state.init_db()
+    before = saved_login(DB_PATH)
+    if not before:   # first save from the dashboard: start from what the env had
+        env = _read_env_file()
+        before = {k.lower(): v for k in INSTAGRAM_LOGIN_FIELDS if (v := env.get(k) or os.getenv(k, ""))}
+    after = dict(before)
+    for key, value in updates.items():
+        if value:
+            after[key.lower()] = value
+        else:
+            after.pop(key.lower(), None)
+    for key in INSTAGRAM_LOGIN_FIELDS:
+        await state.set_setting(key.lower(), after.get(key.lower(), ""))
+    if after != before:
+        (Path(DB_PATH).parent / "instagram_session.json").unlink(missing_ok=True)
+
+
 @app.post("/api/settings/env")
 async def save_env_settings(request: Request):
-    """Save environment variables to .env file."""
+    """Save environment variables to .env file (the Instagram login to the database)."""
     try:
         data = await request.json()
     except Exception:
@@ -444,6 +475,9 @@ async def save_env_settings(request: Request):
                                         status_code=400)
                 # Strip newlines so a crafted value can't inject extra .env entries
                 updates[key] = value.replace("\n", " ").replace("\r", " ").strip()
+        instagram = {k: updates.pop(k) for k in INSTAGRAM_LOGIN_FIELDS if k in updates}
+        if instagram:
+            await _save_instagram_login(instagram)
         if updates:
             try:
                 _write_env_file(updates)
@@ -732,7 +766,7 @@ async def test_instagram():
     from harvey.agents.instagram import PAUSE_KEY
     from harvey.config import load_env
     from harvey.integrations.instagram import InstagramClient
-    ok, message = await InstagramClient.from_env(load_env()).test_connection()
+    ok, message = await InstagramClient.from_env(load_env(), db_file=DB_PATH).test_connection()
     state = _state()
     await state.init_db()
     paused = await state.get_setting(PAUSE_KEY)
@@ -2197,7 +2231,7 @@ def _chat_client(channel: str):
     from harvey.config import load_env
     if channel == "instagram":
         from harvey.integrations.instagram import InstagramClient
-        client, what = InstagramClient.from_env(load_env()), "Instagram"
+        client, what = InstagramClient.from_env(load_env(), db_file=DB_PATH), "Instagram"
     else:
         from harvey.integrations.evolution import EvolutionClient
         client, what = EvolutionClient.from_env(load_env()), "WhatsApp (Evolution)"
