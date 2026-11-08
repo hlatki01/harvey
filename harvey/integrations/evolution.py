@@ -163,16 +163,21 @@ class EvolutionClient:
         return found
 
     async def send_text(self, number: str, text: str) -> SendResult:
-        async with self._client() as client:
-            r = await client.post(self._url("message/sendText"),
-                                  json={"number": number, "text": markdown_to_whatsapp(text),
-                                        "delay": TYPING_DELAY_MS})
+        try:
+            async with self._client() as client:
+                r = await client.post(self._url("message/sendText"),
+                                      json={"number": number, "text": markdown_to_whatsapp(text),
+                                            "delay": TYPING_DELAY_MS})
+        except httpx.ConnectError as e:   # never reached Evolution, so nothing went out
+            return SendResult(ok=False, error=f"Evolution API unreachable: {e}"[:200], retry=True)
         if r.status_code >= 400:
             try:
                 error = str(r.json())[:200]
             except Exception:
                 error = r.text[:200]
-            return SendResult(ok=False, error=f"Evolution API {r.status_code}: {error}")
+            # The instance lost its WhatsApp session: the message was not sent.
+            return SendResult(ok=False, error=f"Evolution API {r.status_code}: {error}",
+                              retry="Connection Closed" in error)
         data = r.json() or {}
         key = data.get("key") or {}
         return SendResult(ok=True, message_id=key.get("id") or "",

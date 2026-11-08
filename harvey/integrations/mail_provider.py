@@ -31,6 +31,7 @@ class SendResult:
     message_id: str = ""     # RFC Message-ID (or provider id) of the sent mail
     thread_ref: str = ""     # provider thread handle (Gmail threadId, etc.)
     error: str = ""
+    retry: bool = False      # it certainly never went out (the link was down): send it again later
 
 
 @dataclass

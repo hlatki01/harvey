@@ -468,6 +468,34 @@ async def test_auto_approve_mode_stages_as_approved(state):
 
 
 @pytest.mark.asyncio
+async def test_a_send_refused_because_whatsapp_is_disconnected_is_rescheduled_not_failed(state):
+    await _company(state, "Um")
+    await _company(state, "Dois", phone="(11) 97777-0000")
+    client = FakeEvolution({"5511987654321": "5511987654321", "5511977770000": "5511977770000"})
+    sender = _sender(state, client, require_approval=False)
+    await sender._stage()
+    tries = []
+
+    async def down(number, text):
+        tries.append(number)
+        return SendResult(ok=False, error="Evolution API 400: Connection Closed", retry=True)
+    client.send_text = down
+    await sender._drain()
+    assert len(tries) == 1                       # stops at the first: the link is down
+    items = await state.get_outbox(channel="whatsapp")
+    assert all(i["status"] == "approved" for i in items)
+    retried = next(i for i in items if i["error"])
+    assert retried["send_at"] > datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_evolution_marks_a_closed_connection_as_retryable():
+    closed = _client(lambda r: httpx.Response(400, json={"response": {"message": ["Error: Connection Closed"]}}))
+    assert (await closed.send_text("5511987654321", "Oi")).retry
+    bad = _client(lambda r: httpx.Response(400, json={"response": {"message": [{"exists": False}]}}))
+    assert not (await bad.send_text("5511987654321", "Oi")).retry
+
+@pytest.mark.asyncio
 async def test_drain_blocks_a_prospect_who_replied_and_records_failures(state):
     await _company(state, "Um")
     await _company(state, "Dois", phone="(11) 97777-0000")

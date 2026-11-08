@@ -47,6 +47,8 @@ WHATSAPP_SUBJECT = "WhatsApp"  # the Outbox desk shows and edits a subject
 # Few and slow: a burst of cold messages is what gets a number banned.
 MAX_SENDS_PER_CYCLE = 4
 SEND_JITTER_SECONDS = (45, 150)
+# A send WhatsApp refused because the instance was disconnected comes back this much later.
+RETRY_AFTER = timedelta(minutes=15)
 STOP_STATUSES = {"replied", "opted_out", "lost", "meeting", "closed"}
 SENDABLE_STATUSES = {"new", "queued"}
 # Who still gets follow-ups when an opening joins a campaign.
@@ -479,6 +481,16 @@ Return ONLY a JSON array:
                     item["id"], status="failed", error=f"send error: {e}"[:300])
                 logger.warning(f"WhatsApp: send to {item['to_email']} raised: {e}")
                 continue
+            if not result.ok and result.retry:
+                # WhatsApp is disconnected: put it back for the next slot, and stop
+                # trying the rest of the queue until the link is back.
+                at = datetime.now(timezone.utc) + RETRY_AFTER
+                at = (closed_until(self.config, at) or at).astimezone(timezone.utc).replace(tzinfo=None)
+                await self.state.update_outbox_item(
+                    item["id"], status="approved", send_at=at.isoformat(), error=result.error[:300])
+                logger.warning(f"WhatsApp: not connected ({result.error[:120]}); "
+                               f"holding sends, next try {at:%d/%m %H:%M} UTC.")
+                break
             if not result.ok:
                 await self.state.update_outbox_item(
                     item["id"], status="failed", error=result.error[:300])
