@@ -4,7 +4,7 @@ split, the WhatsApp sender (stage / drain) and reading replies."""
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -1522,7 +1522,8 @@ async def test_a_reply_that_needs_no_answer_still_gets_a_follow_up(state):
 @pytest.mark.asyncio
 async def test_a_chat_left_on_our_last_word_gets_its_remaining_follow_up(state):
     pid = await _contacted_prospect(state)
-    old = datetime(2026, 10, 30, 17, 0)
+    # Recent, so the planned nudge (3 business days on) is still ahead: a fixed date rots into "overdue".
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
     convo = Conversation(id="", prospect_id=pid, channel="whatsapp", status="open", thread=[
         Message(sender="prospect", content="Pode ser", timestamp=old),
         Message(sender="team", content="Segue o modelo", timestamp=old),
