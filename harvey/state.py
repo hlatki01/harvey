@@ -11,8 +11,9 @@ upgrade cleanly in place.
 
 import asyncio
 import json
+import sqlite3
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 
@@ -583,6 +584,22 @@ _CONVERSATION_COLUMNS = frozenset({
     "thread_json", "intent", "stage", "status", "offered_slots",
     "follow_up_at", "follow_ups",
 })
+
+
+
+def read_settings(db_file: Path | str, keys: tuple[str, ...]) -> dict[str, str]:
+    """Settings saved from the dashboard, read synchronously and read-only:
+    {key: value} for the non-empty ones, {} when the database isn't there."""
+    db_file = Path(db_file)
+    if not db_file.is_file():
+        return {}
+    try:
+        with closing(sqlite3.connect(f"{db_file.resolve().as_uri()}?mode=ro", uri=True, timeout=5)) as db:
+            rows = db.execute(f"SELECT key, value FROM settings WHERE key IN ({','.join('?' * len(keys))})",
+                              keys).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {k: v for k, v in rows if v}
 
 
 class StateManager:

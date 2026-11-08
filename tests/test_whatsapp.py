@@ -1541,3 +1541,29 @@ def test_markdown_becomes_whatsapp_formatting():
     assert markdown_to_whatsapp("## Exemplos\n~~velho~~ __novo__ *já*") == "*Exemplos*\n~velho~ *novo* *já*"
     assert markdown_to_whatsapp("[Peças](https://x.me/pecas) [https://a.me](https://a.me)") == \
         "Peças: https://x.me/pecas https://a.me"
+
+
+@pytest.mark.asyncio
+async def test_instances_list_create_and_manage():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/instance/fetchInstances":
+            return httpx.Response(200, json=[{"name": "a", "connectionStatus": "open",
+                                              "ownerJid": "5511987654321@s.whatsapp.net", "profileName": "Shop"}])
+        if request.url.path == "/instance/create":
+            assert json.loads(request.content)["instanceName"] == "b"
+            return httpx.Response(201, json={"qrcode": {"base64": "data:image/png;base64,QR"}})
+        if request.url.path == "/instance/connect/a":
+            return httpx.Response(200, json={"instance": {"state": "open"}})
+        return httpx.Response(200, json={"status": "SUCCESS"})
+
+    c = _client(handler)
+    [inst] = await c.list_instances()
+    assert inst["number"] == "5511987654321" and inst["status"] == "open"
+    assert await c.create_instance("b") == "data:image/png;base64,QR"
+    assert await c.connect_qr("a") == ""  # already connected: no code
+    await c.restart_instance("a"); await c.logout_instance("a"); await c.delete_instance("a")
+    assert seen[-3:] == [("POST", "/instance/restart/a"), ("DELETE", "/instance/logout/a"),
+                         ("DELETE", "/instance/delete/a")]

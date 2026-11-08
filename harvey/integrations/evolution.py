@@ -20,6 +20,8 @@ from harvey.integrations.mail_provider import SendResult
 logger = logging.getLogger("harvey.evolution")
 
 TIMEOUT = 30
+# settings-table key for the instance picked in the dashboard (prod's .env is read-only)
+INSTANCE_SETTING = "evolution_instance"
 USER_JID_SUFFIX = "@s.whatsapp.net"
 # Typing time shown to the recipient before the text arrives, in ms.
 TYPING_DELAY_MS = 2500
@@ -97,15 +99,26 @@ class EvolutionClient:
     name = "evolution"
 
     def __init__(self, base_url: str, api_key: str, instance: str,
-                 transport: httpx.AsyncBaseTransport | None = None):
+                 transport: httpx.AsyncBaseTransport | None = None, db_file=None):
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key
-        self.instance = instance
+        self._instance = instance
         self._transport = transport
+        self._db_file = db_file
 
     @classmethod
     def from_env(cls, env) -> "EvolutionClient":
-        return cls(env.evolution_api_url, env.evolution_api_key, env.evolution_instance)
+        from harvey.state import DB_PATH
+        return cls(env.evolution_api_url, env.evolution_api_key, env.evolution_instance, db_file=DB_PATH)
+
+    @property
+    def instance(self) -> str:
+        """The number Harvey uses: the one picked in the dashboard, else EVOLUTION_INSTANCE.
+        Read on every use, so a switch reaches the running loop without a restart."""
+        if self._db_file:
+            from harvey.state import read_settings
+            return read_settings(self._db_file, (INSTANCE_SETTING,)).get(INSTANCE_SETTING) or self._instance
+        return self._instance
 
     def is_configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.instance)
@@ -306,6 +319,44 @@ class EvolutionClient:
         records = (data.get("messages") or {}).get("records") if isinstance(data, dict) else data
         return not any((rec.get("key") or {}).get("fromMe") and (rec.get("key") or {}).get("id") not in own_ids
                        for rec in records or [])
+
+    # ── Instances: every number this Evolution server holds, not just ours ──
+
+    async def _call(self, method: str, path: str, **kwargs):
+        async with self._client() as client:
+            r = await client.request(method, f"{self.base_url}/{path}", **kwargs)
+        self._raise_for_error(r)
+        return r.json() if r.content else {}
+
+    async def list_instances(self) -> list[dict]:
+        data = await self._call("GET", "instance/fetchInstances")
+        return [{
+            "name": i.get("name") or "",
+            "status": i.get("connectionStatus") or "unknown",  # open | connecting | close
+            "number": (i.get("ownerJid") or "").split("@")[0],
+            "profile_name": i.get("profileName") or "",
+            "disconnected_at": i.get("disconnectionAt") or "",
+            "created_at": i.get("createdAt") or "",
+        } for i in data or [] if isinstance(i, dict)]
+
+    async def create_instance(self, name: str) -> str:
+        """A new Baileys instance; returns its first QR code (data: URL)."""
+        data = await self._call("POST", "instance/create", json={
+            "instanceName": name, "integration": "WHATSAPP-BAILEYS", "qrcode": True})
+        return (data.get("qrcode") or {}).get("base64") or ""
+
+    async def connect_qr(self, name: str) -> str:
+        """A fresh QR code to pair the phone; empty when it is already connected."""
+        return (await self._call("GET", f"instance/connect/{name}")).get("base64") or ""
+
+    async def restart_instance(self, name: str) -> None:
+        await self._call("POST", f"instance/restart/{name}")
+
+    async def logout_instance(self, name: str) -> None:
+        await self._call("DELETE", f"instance/logout/{name}")
+
+    async def delete_instance(self, name: str) -> None:
+        await self._call("DELETE", f"instance/delete/{name}")
 
     async def test_connection(self) -> tuple[bool, str]:
         if not self.is_configured():

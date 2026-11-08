@@ -5,10 +5,11 @@ import { IntegrationsPane } from './IntegrationsPane'
 import { UsersPane } from './UsersPane'
 import { CitiesPane } from './CitiesPane'
 import { HoursPane } from './HoursPane'
+import { WhatsAppPane } from './WhatsAppPane'
 
 const KEY = 'harvey-settings-pane'
-type Pane = 'integrations' | 'cities' | 'hours' | 'users'
-const PANES: Pane[] = ['integrations', 'cities', 'hours', 'users']
+type Pane = 'integrations' | 'whatsapp' | 'cities' | 'hours' | 'users'
+const PANES: Pane[] = ['integrations', 'whatsapp', 'cities', 'hours', 'users']
 
 function initialPane(): Pane {
   try { const p = localStorage.getItem(KEY) as Pane; return PANES.includes(p) ? p : 'integrations' } catch { return 'integrations' }
@@ -36,7 +37,7 @@ export function SettingsPage() {
           >{p}</button>
         ))}
       </div>
-      {pane === 'users' ? <UsersPane /> : pane === 'cities' ? <CitiesPane /> : pane === 'hours' ? <HoursPane /> : <IntegrationsPane />}
+      {pane === 'users' ? <UsersPane /> : pane === 'cities' ? <CitiesPane /> : pane === 'hours' ? <HoursPane /> : pane === 'whatsapp' ? <WhatsAppPane /> : <IntegrationsPane />}
     </>
   )
 }

@@ -19,8 +19,6 @@ instagrapi is synchronous, so each call runs in a worker thread, one at a time.
 import asyncio
 import logging
 import re
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
@@ -36,16 +34,8 @@ LOGIN_KEYS = ("instagram_username", "instagram_password", "instagram_sessionid")
 
 def saved_login(db_file: Path | str) -> dict[str, str]:
     """The login saved from the dashboard, {key: value}; {} when there is none."""
-    db_file = Path(db_file)
-    if not db_file.is_file():
-        return {}
-    try:
-        with closing(sqlite3.connect(f"{db_file.resolve().as_uri()}?mode=ro", uri=True, timeout=5)) as db:
-            rows = db.execute("SELECT key, value FROM settings WHERE key IN (?, ?, ?)",
-                              LOGIN_KEYS).fetchall()
-    except sqlite3.Error:
-        return {}
-    return {k: v for k, v in rows if v}
+    from harvey.state import read_settings
+    return read_settings(db_file, LOGIN_KEYS)
 
 
 class InstagramBlocked(RuntimeError):

@@ -188,3 +188,14 @@ def test_login_is_rate_limited(owner, monkeypatch):
     codes = [c.post("/api/auth/login", json={"email": "x@example.com", "password": "bad-bad-bad-1"}).status_code
              for _ in range(dash.LOGIN_MAX + 1)]
     assert codes[:dash.LOGIN_MAX] == [401] * dash.LOGIN_MAX and codes[-1] == 429
+
+
+def test_whatsapp_use_instance_switches_the_client_and_rejects_bad_names(owner):
+    from harvey.integrations.evolution import EvolutionClient
+    assert owner.post("/api/settings/whatsapp/instances/bad..name/use").status_code == 400
+    assert owner.post("/api/settings/whatsapp/instances/loja2/use").json()["success"]
+    client = EvolutionClient("http://evo.test", "KEY", "from-env", db_file=dash.DB_PATH)
+    assert client.instance == "loja2"
+    assert owner.post("/api/settings/env", json={"EVOLUTION_INSTANCE": "a/b"}).status_code == 400
+    owner.post("/api/settings/env", json={"EVOLUTION_INSTANCE": ""})   # empty: back to the env's
+    assert client.instance == "from-env"

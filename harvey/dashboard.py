@@ -405,7 +405,7 @@ async def get_settings():
         "zerobounce_api_key_set": is_set("ZEROBOUNCE_API_KEY"),
         "hunter_api_key_set": is_set("HUNTER_API_KEY"),
         "evolution_api_url": env_vars.get("EVOLUTION_API_URL", ""),
-        "evolution_instance": env_vars.get("EVOLUTION_INSTANCE", ""),
+        "evolution_instance": _active_instance(env_vars.get("EVOLUTION_INSTANCE", "")),
         "evolution_api_key_set": is_set("EVOLUTION_API_KEY"),
         "instagram_username": env_vars.get("INSTAGRAM_USERNAME", ""),
         "instagram_password_set": is_set("INSTAGRAM_PASSWORD"),
@@ -476,6 +476,12 @@ async def save_env_settings(request: Request):
                 # Strip newlines so a crafted value can't inject extra .env entries
                 updates[key] = value.replace("\n", " ").replace("\r", " ").strip()
         instagram = {k: updates.pop(k) for k in INSTAGRAM_LOGIN_FIELDS if k in updates}
+        if "EVOLUTION_INSTANCE" in updates:
+            name = updates.pop("EVOLUTION_INSTANCE")
+            if name and not _INSTANCE_RE.fullmatch(name):   # it goes into Evolution URLs
+                return JSONResponse({"success": False, "message": "Instance name: letters, numbers, - and _ only."},
+                                    status_code=400)
+            await _set_active_instance(name)
         if instagram:
             await _save_instagram_login(instagram)
         if updates:
@@ -757,6 +763,105 @@ async def test_whatsapp():
     # Saving through the dashboard reloads .env into the process, so this sees it.
     ok, message = await EvolutionClient.from_env(load_env()).test_connection()
     return {"success": ok, "message": message}
+
+
+# ── WhatsApp numbers: the Evolution instances (admin only: under /api/settings) ──
+
+_INSTANCE_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
+
+
+def _evolution():
+    """(client, active instance name, None) or (None, "", an error response)."""
+    from harvey.config import load_env
+    from harvey.integrations.evolution import EvolutionClient
+    client = EvolutionClient.from_env(load_env())
+    if not (client.base_url and client.api_key):
+        return None, "", JSONResponse({"success": False, "message":
+                                       "Set the Evolution API URL and key under Integrations first."}, status_code=503)
+    return client, client.instance, None
+
+
+async def _instance_call(name: str, call, ok: str):
+    if not _INSTANCE_RE.fullmatch(name):
+        return JSONResponse({"success": False, "message": "Invalid instance name."}, status_code=400)
+    client, _, err = _evolution()
+    if err:
+        return err
+    try:
+        result = await call(client, name)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)[:300]}, status_code=502)
+    return {"success": True, "message": ok, "qr": result or ""}
+
+
+def _active_instance(env_value: str) -> str:
+    from harvey.integrations.evolution import INSTANCE_SETTING
+    from harvey.state import read_settings
+    return read_settings(DB_PATH, (INSTANCE_SETTING,)).get(INSTANCE_SETTING) or env_value
+
+
+async def _set_active_instance(name: str) -> None:
+    """Into the settings table, not .env: prod's .env is read-only. Empty falls back to the env."""
+    from harvey.integrations.evolution import INSTANCE_SETTING
+    state = _state()
+    await state.init_db()
+    await state.set_setting(INSTANCE_SETTING, name)
+
+
+@app.get("/api/settings/whatsapp/instances")
+async def whatsapp_instances():
+    client, active, err = _evolution()
+    if err:
+        return err
+    try:
+        instances = await client.list_instances()
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)[:300]}, status_code=502)
+    return {"success": True, "active": active, "instances": instances}
+
+
+@app.post("/api/settings/whatsapp/instances")
+async def whatsapp_create_instance(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    name = str(body.get("name") or "").strip() if isinstance(body, dict) else ""
+    return await _instance_call(name, lambda c, n: c.create_instance(n), "Created. Scan the QR code with WhatsApp.")
+
+
+@app.post("/api/settings/whatsapp/instances/{name}/connect")
+async def whatsapp_connect_instance(name: str):
+    return await _instance_call(name, lambda c, n: c.connect_qr(n), "Scan the QR code with WhatsApp.")
+
+
+@app.post("/api/settings/whatsapp/instances/{name}/use")
+async def whatsapp_use_instance(name: str):
+    """Send and read WhatsApp through this number from now on."""
+    if not _INSTANCE_RE.fullmatch(name):
+        return JSONResponse({"success": False, "message": "Invalid instance name."}, status_code=400)
+    await _set_active_instance(name)
+    _wa_link["at"] = 0.0   # re-check the link for the new number
+    return {"success": True, "message": f"Roadie Crew now uses {name}."}
+
+
+@app.post("/api/settings/whatsapp/instances/{name}/restart")
+async def whatsapp_restart_instance(name: str):
+    return await _instance_call(name, lambda c, n: c.restart_instance(n), "Restarted.")
+
+
+@app.post("/api/settings/whatsapp/instances/{name}/logout")
+async def whatsapp_logout_instance(name: str):
+    return await _instance_call(name, lambda c, n: c.logout_instance(n), "Disconnected.")
+
+
+@app.delete("/api/settings/whatsapp/instances/{name}")
+async def whatsapp_delete_instance(name: str):
+    _, active, err = _evolution()
+    if not err and name == active:
+        return JSONResponse({"success": False, "message": "Roadie Crew sends from this instance. "
+                             "Point Integrations at another one before deleting it."}, status_code=409)
+    return await _instance_call(name, lambda c, n: c.delete_instance(n), "Deleted.")
 
 
 @app.post("/api/settings/test-instagram")
