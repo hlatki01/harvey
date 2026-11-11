@@ -850,6 +850,9 @@ class EnvConfig(BaseModel):
     hunter_api_key: str = ""
     serper_api_key: str = ""
     google_places_api_key: str = ""
+    # Self-hosted, homelab services (docker-compose profile "local")
+    searxng_url: str = ""
+    gmaps_scraper_url: str = ""
     # WhatsApp via Evolution API (channels.whatsapp.enabled)
     evolution_api_url: str = ""
     evolution_api_key: str = ""
@@ -974,6 +977,8 @@ def load_env() -> EnvConfig:
         hunter_api_key=os.getenv("HUNTER_API_KEY", "").strip(),
         serper_api_key=os.getenv("SERPER_API_KEY", "").strip(),
         google_places_api_key=os.getenv("GOOGLE_PLACES_API_KEY", "").strip(),
+        searxng_url=os.getenv("SEARXNG_URL", "").strip().rstrip("/"),
+        gmaps_scraper_url=os.getenv("GMAPS_SCRAPER_URL", "").strip().rstrip("/"),
         evolution_api_url=os.getenv("EVOLUTION_API_URL", "").strip().rstrip("/"),
         evolution_api_key=os.getenv("EVOLUTION_API_KEY", "").strip(),
         evolution_instance=os.getenv("EVOLUTION_INSTANCE", "").strip(),

@@ -428,6 +428,21 @@ async def verify_hunter(email: str, api_key: str) -> Optional[dict]:
     return {"status": status, "catch_all": bool(data.get("accept_all"))}
 
 
+def _rcpt_refusal_verdict(code: int, message: str) -> Optional[bool]:
+    """False only when the server says the mailbox doesn't exist.
+
+    A 5.7.x is a policy block on *our* IP (e.g. Spamhaus listing), not a
+    verdict on the address, so it stays inconclusive.
+    """
+    msg = (message or "").lower()
+    if "5.7." in msg or any(w in msg for w in (
+            "spamhaus", "blocklist", "blacklist", "blocked", "reputation", "policy", " ip ")):
+        return None
+    if "5.1.1" in msg or "5.1.10" in msg or code in (550, 551, 553):
+        return False
+    return None
+
+
 async def verify_email_smtp(email: str) -> Optional[bool]:
     """SMTP RCPT check — only trustworthy for small, self-hosted mail servers.
 
@@ -440,17 +455,15 @@ async def verify_email_smtp(email: str) -> Optional[bool]:
     mx_host = await get_mx_host(domain)
     if not mx_host:
         return None
-    smtp = aiosmtplib.SMTP(hostname=mx_host, port=25, timeout=10)
+    smtp = aiosmtplib.SMTP(hostname=mx_host, port=25, timeout=10, validate_certs=False)
     try:
         await smtp.connect()
         await smtp.ehlo()
         await smtp.mail("verify@example.com")
         code, _ = await smtp.rcpt(email)
-        if code == 250:
-            return True
-        if code in (550, 551, 553):
-            return False
-        return None
+        return True if code == 250 else None
+    except aiosmtplib.SMTPRecipientRefused as e:
+        return _rcpt_refusal_verdict(e.code, e.message)
     except Exception as e:
         logger.debug(f"SMTP verification failed for {email}: {e}")
         return None
@@ -490,6 +503,19 @@ def _status_from_verdict(verdict: dict) -> Optional[str]:
     return None  # unknown / risky-unknown — inconclusive
 
 
+async def _smtp_verdict(email: str) -> tuple[Optional[str], bool]:
+    """Free SMTP probe → (verified / invalid / risky / None, catch_all_seen)."""
+    smtp = await verify_email_smtp(email)
+    if smtp is False:
+        return "invalid", False
+    if smtp is True:
+        # Confirm it's not just a catch-all before trusting "verified".
+        if await detect_catch_all(email.split("@")[1]) is True:
+            return "risky", True
+        return "verified", False
+    return None, False
+
+
 async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str], bool]:
     """Run the best available verifier for this domain type.
 
@@ -502,8 +528,15 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
 
     catch_all_seen = False
 
-    # Big providers: ZeroBounce first (its engine cracks their catch-alls),
-    # then Reoon, then Hunter. SMTP is useless/misleading here.
+    # Google / Microsoft: a free SMTP probe settles tenants without catch-all
+    # (Google 5.1.1, M365 directory-based edge blocking 5.4.1). Gateways
+    # (Proofpoint, Mimecast…) block residential IPs, so they go straight to APIs.
+    if mx_type in ("google", "microsoft"):
+        status, catch_all_seen = await _smtp_verdict(email)
+        if status in ("verified", "invalid"):
+            return status, catch_all_seen
+
+    # Then ZeroBounce first (its engine cracks their catch-alls), Reoon, Hunter.
     if mx_type in ("google", "microsoft", "gateway"):
         channels = []
         if zerobounce_key:
@@ -523,7 +556,12 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
                 return status, catch_all_seen
         return None, catch_all_seen
 
-    # Small / self-hosted: Reoon → SMTP (still works here) → Hunter.
+    # Small / self-hosted: free SMTP probe first, credits only if it can't tell
+    # (port 25 blocked, or our IP refused by policy) → Reoon → Hunter.
+    status, catch_all_seen = await _smtp_verdict(email)
+    if status is not None:
+        return status, catch_all_seen
+
     if reoon_key:
         verdict = await verify_reoon(email, reoon_key)
         if verdict:
@@ -532,15 +570,6 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
             status = _status_from_verdict(verdict)
             if status is not None:
                 return status, catch_all_seen
-
-    smtp = await verify_email_smtp(email)
-    if smtp is True:
-        # Confirm it's not just a catch-all before trusting "verified".
-        if await detect_catch_all(email.split("@")[1]) is True:
-            return "risky", True
-        return "verified", catch_all_seen
-    if smtp is False:
-        return "invalid", catch_all_seen
 
     if hunter_key:
         verdict = await verify_hunter(email, hunter_key)

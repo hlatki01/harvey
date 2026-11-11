@@ -330,7 +330,8 @@ class Scout:
         """Search the web using the best available backend.
 
         Returns list of (url, snippet) tuples.
-        Tries backends in order: Serper API → DuckDuckGo → Bing → Google.
+        Tries backends in order: SearXNG (self-hosted) → Serper API →
+        DuckDuckGo → Bing → Google.
         """
         if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
             logger.info("Scout: Query limit reached for this cycle. Will continue next cycle.")
@@ -343,7 +344,10 @@ class Scout:
             await asyncio.sleep(random.uniform(*SEARCH_DELAY))
 
         serper_key = getattr(self.env, "serper_api_key", "") or ""
+        searxng_url = getattr(self.env, "searxng_url", "") or ""
         backends = []
+        if searxng_url:
+            backends.append(lambda: self._search_searxng(query, searxng_url))
         if serper_key:
             backends.append(lambda: self._search_serper(query, serper_key))
         backends.extend([
@@ -378,6 +382,27 @@ class Scout:
             seen.add(norm)
             out.append((url, snippet))
         return out
+
+    async def _search_searxng(self, query: str, base_url: str) -> list[tuple[str, str]]:
+        """Search via a self-hosted SearXNG (JSON format enabled) — free.
+
+        Plain httpx, not _fetch: the URL is the operator's own internal service,
+        which the public-only client would rightly refuse.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                r = await client.get(f"{base_url}/search",
+                                     params={"q": query, "format": "json"})
+            r.raise_for_status()
+            data = r.json()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.debug(f"SearXNG search failed: {e}")
+            return []
+        results = []
+        for item in (data.get("results") if isinstance(data, dict) else None) or []:
+            if isinstance(item, dict) and item.get("url"):
+                results.append((item["url"], item.get("content", "") or ""))
+        return results[:MAX_RESULTS_PER_QUERY]
 
     async def _search_serper(self, query: str, api_key: str) -> list[tuple[str, str]]:
         """Search via Serper.dev API — most reliable, $5/mo for 2.5k searches."""

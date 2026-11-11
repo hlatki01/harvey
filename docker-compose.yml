@@ -10,7 +10,11 @@
 # Evolution API keeps running from its own compose project (deploy_evolution
 # network); Harvey joins that network to reach it by name.
 #
+#   searxng / gmaps-scraper (profile "local") self-hosted web search and Google
+#               Maps listings for discovery. Reached by name; no host ports.
+#
 #   docker compose up -d --build                    # harvey + dashboard
+#   docker compose --profile local up -d            # + searxng and gmaps-scraper
 #   docker compose --profile public up -d           # + the tunnel
 #   docker compose exec dashboard python -m harvey dashboard --url   # owner link
 
@@ -24,6 +28,9 @@ x-harvey: &harvey
     HARVEY_CONTAINER: "1"
     # The host's http://127.0.0.1:18080 is not this container's loopback.
     EVOLUTION_API_URL: http://evolution-api:8080
+    # Profile "local" services; harmless when they aren't running (the backend just fails over).
+    SEARXNG_URL: http://searxng:8080
+    GMAPS_SCRAPER_URL: http://gmaps-scraper:8080
   volumes:
     # A named volume, not a bind mount: SQLite in WAL mode needs real shared
     # memory between the two containers, which Windows bind mounts don't give.
@@ -81,8 +88,35 @@ services:
     cap_drop: [ALL]
     read_only: true
 
+  searxng:
+    image: searxng/searxng:2026.11.5-3e95f6cd2
+    profiles: ["local"]
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-}   # required; SearXNG refuses to start without one
+      FORCE_OWNERSHIP: "false"      # settings.yml is mounted read-only
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  gmaps-scraper:
+    image: gosom/google-maps-scraper:v1.18.2
+    profiles: ["local"]
+    restart: unless-stopped
+    command: ["-web", "-data-folder", "/gmapsdata"]
+    volumes:
+      - gmaps-data:/gmapsdata
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
 volumes:
   harvey-data:
+  gmaps-data:
 
 networks:
   evolution:

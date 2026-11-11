@@ -95,6 +95,8 @@ DATAFORSEO_SANDBOX=                       # any value routes to the free sandbox
 # --- Optional ---
 LINKEDIN_EMAIL=  LINKEDIN_PASSWORD=   # LinkedIn prospecting
 CLOUDFLARE_ACCOUNT_ID=  CLOUDFLARE_API_TOKEN=   # deep JS crawling for training
+SEARXNG_SECRET=            # any long random string; the self-hosted SearXNG (compose profile "local") refuses to start without it
+# SEARXNG_URL / GMAPS_SCRAPER_URL are set by docker-compose.yml; set them yourself outside compose
 SERPER_API_KEY=            # web search + discovery (2,500 free, then a $50 prepaid pack)
 INSTAGRAM_USERNAME=  INSTAGRAM_PASSWORD=   # or INSTAGRAM_SESSIONID: Instagram DMs + discovery via instagrapi (unofficial; use a spare account)
 HARVEY_WEBHOOK_SECRET=     # signs stage-change posts to crm.webhook_url (harvey.yaml)
@@ -102,7 +104,7 @@ HARVEY_WEBHOOK_SECRET=     # signs stage-change posts to crm.webhook_url (harvey
 
 **Recommended provider — Gmail:** for <50 cold emails/day, a real Google Workspace mailbox on a *dedicated secondary domain* (never the main one) is the most deliverable, cheapest (~$7/mo) option. Set `channels.email.provider: gmail` in harvey.yaml, put the OAuth client id/secret in `.env`, then run `harvey gmail auth` (one-time browser login). SMTP works with any mailbox (AgentMail, Fastmail). Instantly still works as a legacy option.
 
-**Email verification matters:** Harvey learns each company's email *pattern* and verifies ONE candidate rather than guessing (raw SMTP probing is not viable from a locally-running agent — outbound port 25 is usually blocked, and Google Workspace / Microsoft 365 accept everything from an unknown IP). Without a verifier key, found emails are marked `guess` and are **never sent**.
+**Email verification matters:** Harvey learns each company's email *pattern* and verifies ONE candidate rather than guessing. Where outbound port 25 is open (many home connections; not Azure or most clouds) a free SMTP probe runs first, Google Workspace and M365 tenants included, with a catch-all check; it settles tenants that reject unknown users and leaves catch-alls, policy blocks of our IP (Spamhaus, Proofpoint…) and gateways to the API verifiers. Without a verifier key, emails the probe can't settle are marked `guess` and are **never sent**.
 
 **Approval by default:** with a native provider, every outgoing email waits in the **Outbox** for your approval (dashboard Outbox tab, or `harvey outbox`). Once you trust the output, set `channels.email.require_approval: false` in harvey.yaml for full autopilot.
 
@@ -188,6 +190,8 @@ side by side: what each source does, what it costs, its free tier, and which
 | **DataForSEO Business Listings** | $0.372/1k businesses | $1 credit | Local trades, clinics, contractors. Phone + domain + rating + whether the listing is claimed, and it can filter for businesses with **no website at all**. |
 | **DataForSEO SERP** | $0.0018 a search at depth 30 | $1 credit + free sandbox | Rank as the buying signal. Positions 11-30 are the sweet spot. |
 | **Serper** | ~$0.30-$1.00/1k | 2,500 free, no card | The easiest paid one to try. |
+| **Google Maps (self-hosted scraper)** | free | unlimited; `docker compose --profile local up -d` | Google Maps coverage without Places billing, phone + website + rating, websiteless businesses included. gosom/google-maps-scraper in the homelab; scraping breaks Google's terms, and a home IP draws captchas under heavy use. Minutes per query. |
+| **SearXNG (self-hosted)** | free | unlimited; same `local` profile | Free web-search discovery, and Scout's first search backend. Merged engines, so no rank signal. |
 | **Instagram** | free | an Instagram login; a few hundred profiles a day | Businesses that live on Instagram, often with no website, with the business phone. Unofficial (instagrapi): Instagram can block the account. |
 
 Cities are geocoded automatically (cached forever, one lookup per city), or set

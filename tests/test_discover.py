@@ -6,6 +6,7 @@ enforced before spending rather than after, that a re-run doesn't duplicate
 anyone, and that directories never make it in.
 """
 
+import json
 import asyncio
 import os
 from contextlib import closing
@@ -944,3 +945,78 @@ def test_phone_from_bio_prefers_the_whatsapp_link():
     assert D.phone_from_bio("https://wa.me/5541912345678", "ligue (41) 3333-4444") == "5541912345678"
     assert D.phone_from_bio("", "Fone: (11) 98765-4321") == "5511987654321"
     assert D.phone_from_bio("", "sem telefone") == ""
+
+
+@pytest.mark.asyncio
+async def test_searxng_adapter_records_no_rank():
+    """SearXNG merges engines; its order is not Google's rank and must not become SERP_RANK."""
+    payload = {"results": [
+        {"url": "https://www.kettlemanroofing.com/", "title": "Kettleman Roofing | Denver"},
+        {"url": "", "title": "nothing"},
+    ]}
+    async with _client(lambda r: httpx.Response(200, json=payload)) as client:
+        out = await D.SearXNG().fetch(client, {"searxng_url": "http://s:8080"},
+                                      D.DiscoveryQuery(term="roofer", location="Denver"))
+    assert len(out) == 1
+    assert out[0].domain == "kettlemanroofing.com" and out[0].rank is None
+
+
+GMAPS_CSV = (
+    "input_id,link,title,category,address,website,phone,review_count,review_rating,cid,place_id\n"
+    "1,https://maps.google.com/?cid=1,Northvale Roofing,Roofer,1 Main St,https://northvaleroofing.com,"
+    "+55 11 5555-0100,512,4.4,111,ChIJabc\n"
+    "1,https://maps.google.com/?cid=2,No Site Roofing,Roofer,2 Main St,,+55 11 5555-0200,,,222,\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_gmaps_scraper_adapter_runs_a_job(monkeypatch):
+    provider = D.GoogleMapsScraper()
+    monkeypatch.setattr(provider, "POLL_INTERVAL_S", 0)
+    calls, job = [], {}
+    statuses = iter(["pending", "working", "ok"])
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.method == "POST":
+            job.update(json.loads(request.content))
+            return httpx.Response(201, json={"id": "j1"})
+        if request.url.path.endswith("/download"):
+            return httpx.Response(200, text=GMAPS_CSV)
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        return httpx.Response(200, json={"ID": "j1", "Status": next(statuses)})
+
+    async with _client(handler) as client:
+        out = await provider.fetch(client, {"gmaps_scraper_url": "http://g:8080"},
+                                   D.DiscoveryQuery(term="telhado", location="Campinas",
+                                                    coordinate="-22.9,-47.06,10"))
+
+    assert job["keywords"] == ["telhado Campinas"] and job["lang"] == "pt"
+    assert job["lat"] == "-22.9" and job["lon"] == "-47.06" and job["radius"] == 10000
+    assert ("DELETE", "/api/v1/jobs/j1") in calls, "jobs are cleaned up"
+
+    site, nosite = out
+    assert site.domain == "northvaleroofing.com" and site.rating == 4.4
+    assert site.review_count == 512 and site.external_id == "gmaps:ChIJabc"
+    assert nosite.has_website is False and nosite.review_count is None
+    assert nosite.identity() == "gmaps:222", "falls back to cid"
+
+
+@pytest.mark.asyncio
+async def test_gmaps_scraper_failed_job_raises_and_cleans_up(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(201, json={"id": "j2"})
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        return httpx.Response(200, json={"Status": "failed"})
+
+    async with _client(handler) as client:
+        with pytest.raises(RuntimeError, match="failed"):
+            await D.GoogleMapsScraper().fetch(client, {"gmaps_scraper_url": "http://g"},
+                                              D.DiscoveryQuery(term="x"))
+    assert "DELETE" in calls

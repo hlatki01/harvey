@@ -22,6 +22,8 @@ already learned.
 
 import asyncio
 import base64
+import csv
+import io
 import logging
 import re
 import time
@@ -927,6 +929,142 @@ class Instagram(DiscoveryProvider):
         )
 
 
+class SearXNG(DiscoveryProvider):
+    """Web search through a self-hosted SearXNG — free, no key, no quota.
+
+    It merges several engines, so the position it returns is not Google's
+    organic rank and is deliberately not recorded as SERP_RANK.
+    """
+
+    key = "searxng"
+    label = "SearXNG (self-hosted)"
+    kind = "serp"
+    blurb = ("Your own metasearch engine in the homelab. Finds businesses by "
+             "searching '<service> <city>' across several engines, for free.")
+    cost_note = "free"
+    free_tier = "unlimited — runs on your own machine"
+    signup_url = "https://docs.searxng.org"
+    env_keys = ("searxng_url",)
+    caveat = ("No rank signal: results are merged from several engines, so the "
+              "order is not Google's. Queries leave from your own IP, so heavy "
+              "use can get the upstream engines to throttle it.")
+
+    async def fetch(self, client, env, query):
+        r = await client.get(f"{env['searxng_url']}/search",
+                              params={"q": query.keyword(), "format": "json"})
+        r.raise_for_status()
+        out = []
+        for item in (r.json().get("results") or [])[:query.depth]:
+            url = item.get("url") or ""
+            domain = normalize_domain(url)
+            if not domain:
+                continue
+            out.append(Business(
+                name=business_name(item.get("title") or "", domain),
+                raw_title=item.get("title") or "",
+                domain=domain,
+                website=url,
+                location=query.location,
+                has_website=True,
+                source_url=url,
+                provider=self.key,
+            ))
+        return out
+
+
+class GoogleMapsScraper(DiscoveryProvider):
+    """Google Maps listings from a self-hosted gosom/google-maps-scraper.
+
+    Its web mode runs one asynchronous job per query: create, poll until
+    ``ok``, download the CSV.
+    """
+
+    key = "gmaps_scraper"
+    label = "Google Maps (self-hosted scraper)"
+    kind = "listings"
+    blurb = ("Google Maps listings with phone, website, rating and review count, "
+             "scraped by your own homelab container. The same coverage as Google "
+             "Places, for free — including businesses with no website.")
+    cost_note = "free"
+    free_tier = "unlimited — runs on your own machine"
+    signup_url = "https://github.com/gosom/google-maps-scraper"
+    env_keys = ("gmaps_scraper_url",)
+    caveat = ("Scraping Google Maps breaks Google's terms of service; the "
+              "decision is yours. Each query takes minutes, and heavy use from "
+              "a home IP draws captchas.")
+
+    LANG = "pt"                    # shortcut: fixed Maps UI language; make it config if a non-Brazil deploy needs it
+    DEPTH = 10                     # result-list scroll depth, the scraper's own default
+    MAX_TIME_S = 600               # the scraper stops a job after this
+    POLL_INTERVAL_S = 10.0
+    ZOOM = 13
+
+    async def fetch(self, client, env, query):
+        base = env["gmaps_scraper_url"]
+        job = {"name": f"harvey: {query.keyword()}"[:100], "keywords": [query.keyword()],
+               "lang": self.LANG, "depth": self.DEPTH, "max_time": self.MAX_TIME_S,
+               "zoom": self.ZOOM}
+        if query.coordinate:
+            lat, lng, radius_km = query.coordinate.split(",")
+            job.update(lat=lat.strip(), lon=lng.strip(),
+                       radius=int(float(radius_km) * 1000))
+        r = await client.post(f"{base}/api/v1/jobs", json=job)
+        r.raise_for_status()
+        job_id = r.json()["id"]
+
+        try:
+            deadline = time.monotonic() + self.MAX_TIME_S + 120
+            while True:
+                r = await client.get(f"{base}/api/v1/jobs/{job_id}")
+                r.raise_for_status()
+                info = r.json()
+                status = info.get("Status") or info.get("status") or ""
+                if status == "ok":
+                    break
+                if status == "failed":
+                    raise RuntimeError(f"Google Maps scraper job {job_id} failed")
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"Google Maps scraper job {job_id} timed out")
+                await asyncio.sleep(self.POLL_INTERVAL_S)
+
+            r = await client.get(f"{base}/api/v1/jobs/{job_id}/download")
+            r.raise_for_status()
+            rows = list(csv.DictReader(io.StringIO(r.text)))
+        finally:
+            try:
+                await client.delete(f"{base}/api/v1/jobs/{job_id}")
+            except httpx.HTTPError:
+                pass
+        return [self._to_business(row, query) for row in rows[:query.limit]
+                if row.get("title")]
+
+    def _to_business(self, row: dict, query: DiscoveryQuery) -> Business:
+        url = (row.get("website") or "").strip()
+        place = (row.get("place_id") or row.get("cid") or "").strip()
+
+        def num(key, cast):
+            try:
+                return cast(float(row.get(key) or ""))
+            except ValueError:
+                return None
+
+        return Business(
+            name=row["title"].strip(),
+            domain=normalize_domain(url),
+            website=url,
+            phone=(row.get("phone") or "").strip(),
+            address=(row.get("address") or "").strip(),
+            location=query.location,
+            category=(row.get("category") or "").strip(),
+            rating=num("review_rating", float),
+            review_count=num("review_count", int),
+            has_website=bool(url),
+            external_id=f"gmaps:{place}" if place else "",
+            source_url=(row.get("link") or "").strip(),
+            provider=self.key,
+        )
+
+
 PROVIDERS: dict[str, DiscoveryProvider] = {
     p.key: p for p in (
         OpenStreetMap(),
@@ -934,6 +1072,8 @@ PROVIDERS: dict[str, DiscoveryProvider] = {
         DataForSEOSerp(),
         Serper(),
         GooglePlaces(),
+        GoogleMapsScraper(),
+        SearXNG(),
         Instagram(),
     )
 }

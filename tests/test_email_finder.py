@@ -21,6 +21,14 @@ from harvey.integrations.email_finder import (
 )
 
 
+
+@pytest.fixture(autouse=True)
+def _no_live_smtp(monkeypatch):
+    """Tests never probe real mail servers; a test that needs SMTP stubs it itself."""
+    async def inconclusive(email):
+        return None
+    monkeypatch.setattr(ef, "verify_email_smtp", inconclusive)
+
 @pytest_asyncio.fixture
 async def state():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -254,3 +262,43 @@ async def test_derive_pattern_spends_and_respects_hunter_budget(state, monkeypat
     _, source, _ = await derive_pattern("second-co.com", state=state)
     assert source == "default"
     assert calls == ["first-co.com"]
+
+
+def test_rcpt_refusal_unknown_user_is_invalid_but_ip_block_is_inconclusive():
+    from harvey.integrations.email_finder import _rcpt_refusal_verdict
+    assert _rcpt_refusal_verdict(550, "5.1.1 The email account that you tried to reach does not exist") is False
+    assert _rcpt_refusal_verdict(550, "5.7.1 Mail from IP 1.2.3.4 was rejected due to listing in Spamhaus SBL") is None
+    assert _rcpt_refusal_verdict(550, "Client host blocked") is None
+    assert _rcpt_refusal_verdict(451, "try again later") is None
+
+
+@pytest.mark.asyncio
+async def test_google_smtp_probe_settles_before_spending_api_credits(monkeypatch):
+    """A Google/M365 tenant without catch-all answers the free probe; APIs aren't called."""
+    async def no_api(*a, **k):
+        raise AssertionError("API credit spent")
+    monkeypatch.setattr(ef, "verify_zerobounce", no_api)
+    monkeypatch.setattr(ef, "verify_reoon", no_api)
+
+    class Env:
+        reoon_api_key = "k"; zerobounce_api_key = "k"
+
+    async def rejected(email): return False
+    monkeypatch.setattr(ef, "verify_email_smtp", rejected)
+    assert await ef._verify_candidate("a@x.com", "google", Env()) == ("invalid", False)
+
+    async def accepted(email): return not email.startswith("zz-no-such-user")
+    monkeypatch.setattr(ef, "verify_email_smtp", accepted)
+    assert await ef._verify_candidate("a@x.com", "microsoft", Env()) == ("verified", False)
+
+
+@pytest.mark.asyncio
+async def test_google_catch_all_falls_through_to_apis(monkeypatch):
+    async def accept_all(email): return True
+    async def zb(email, key): return {"status": "valid", "catch_all": False}
+    monkeypatch.setattr(ef, "verify_email_smtp", accept_all)
+    monkeypatch.setattr(ef, "verify_zerobounce", zb)
+
+    class Env:
+        reoon_api_key = ""; zerobounce_api_key = "k"
+    assert await ef._verify_candidate("a@x.com", "google", Env()) == ("verified", True)

@@ -1,0 +1,8 @@
+# SearXNG for Harvey: an internal search API, reached only by the harvey
+# containers on the compose network. secret_key comes from SEARXNG_SECRET.
+use_default_settings: true
+server:
+  limiter: false          # only Harvey talks to it; the bot limiter would block it
+  image_proxy: false
+search:
+  formats: [html, json]   # Harvey reads format=json
