@@ -1040,7 +1040,8 @@ class GoogleMapsScraper(DiscoveryProvider):
 
     def _to_business(self, row: dict, query: DiscoveryQuery) -> Business:
         url = (row.get("website") or "").strip()
-        place = (row.get("place_id") or row.get("cid") or "").strip()
+        place_id = (row.get("place_id") or "").strip()
+        cid = (row.get("cid") or "").strip()
 
         def num(key, cast):
             try:
@@ -1059,7 +1060,9 @@ class GoogleMapsScraper(DiscoveryProvider):
             rating=num("review_rating", float),
             review_count=num("review_count", int),
             has_website=bool(url),
-            external_id=f"gmaps:{place}" if place else "",
+            # Same Google place id as the Places API: share its namespace so one business is one row.
+            external_id=(f"google_places:{place_id}" if place_id
+                         else f"gmaps:{cid}" if cid else ""),
             source_url=(row.get("link") or "").strip(),
             provider=self.key,
         )

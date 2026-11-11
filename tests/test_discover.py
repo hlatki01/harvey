@@ -998,7 +998,7 @@ async def test_gmaps_scraper_adapter_runs_a_job(monkeypatch):
 
     site, nosite = out
     assert site.domain == "northvaleroofing.com" and site.rating == 4.4
-    assert site.review_count == 512 and site.external_id == "gmaps:ChIJabc"
+    assert site.review_count == 512 and site.external_id == "google_places:ChIJabc"
     assert nosite.has_website is False and nosite.review_count is None
     assert nosite.identity() == "gmaps:222", "falls back to cid"
 
