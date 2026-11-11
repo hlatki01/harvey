@@ -25,6 +25,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("harvey")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per poll buries the real log
 
 # Backoff for consecutive failed cycles: 60s, 120s, 240s, ... capped at 15 min
 ERROR_BACKOFF_BASE = 60
@@ -348,6 +349,12 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     instagram = InstagramSender(state, config, env, brain=brain)
     analyst = Analyst(state)
 
+    if os.environ.get("HARVEY_CONTAINER"):  # the dashboard is another container: share the log through the data volume
+        from logging.handlers import RotatingFileHandler
+        log_file = RotatingFileHandler(Path(state.db_path).parent / "harvey.log", maxBytes=2_000_000,
+                                       backupCount=1, encoding="utf-8")
+        log_file.setFormatter(logging.getLogger().handlers[0].formatter)
+        logging.getLogger().addHandler(log_file)
     beacon = asyncio.create_task(alive_beacon(Path(state.db_path).parent / "harvey.alive", stop_event))
     live = (asyncio.create_task(whatsapp_live(handler, whatsapp, stop_event))
             if whatsapp.is_active else None)

@@ -1241,13 +1241,19 @@ async def get_feedback(entity_type: str, entity_id: str):
 # ── Harvey Controls ──
 
 
+def _loop_up() -> bool:
+    """Is the heartbeat loop alive, here or in its own container?"""
+    if IN_CONTAINER:  # the loop is another container: its beacon file is the only sign of life
+        alive = DB_PATH.parent / "harvey.alive"
+        return alive.exists() and time.time() - alive.stat().st_mtime < ALIVE_STALE_SECONDS
+    return _check_harvey_pid() is not None
+
+
 @app.get("/api/harvey/status")
 async def get_harvey_status():
     """Check if Harvey is currently running."""
-    if IN_CONTAINER:  # the loop is another container: its beacon file is the only sign of life
-        alive = DB_PATH.parent / "harvey.alive"
-        up = alive.exists() and time.time() - alive.stat().st_mtime < ALIVE_STALE_SECONDS
-        return {"running": up, "pid": None, "started_at": None}
+    if IN_CONTAINER:
+        return {"running": _loop_up(), "pid": None, "started_at": None}
     pid = _check_harvey_pid()
     started = _harvey_started_at.isoformat() if _harvey_started_at else None
     return {"running": pid is not None, "pid": pid, "started_at": started}
@@ -3121,9 +3127,9 @@ async def get_live_status():
     elif wa_only:
         next_up, next_tab = "Search more cities or industries to get more leads.", "discover"
     elif profiled > checked:
-        next_up, next_tab = f"Find emails for the {profiled - checked} businesses not checked yet.", "controls"
+        next_up, next_tab = f"Find emails for the {profiled - checked} businesses not checked yet.", "" if _loop_up() else "controls"
     elif deliverable - drafted:
-        next_up, next_tab = f"Write first emails for {len(deliverable - drafted)} more contact(s).", "controls"
+        next_up, next_tab = f"Write first emails for {len(deliverable - drafted)} more contact(s).", "" if _loop_up() else "controls"
     elif not companies:
         next_up, next_tab = "Search for businesses to get started.", "discover"
     else:
