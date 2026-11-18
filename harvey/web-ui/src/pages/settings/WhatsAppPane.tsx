@@ -18,7 +18,7 @@ export function WhatsAppPane() {
   const toast = useToast()
   const [qr, setQr] = useState<{ name: string; src: string } | null>(null)
   // While a QR code is up, watch for the phone to pair, then put it away.
-  const { data, refetch } = useApi<{ active: string; instances: Instance[] }>('/api/settings/whatsapp/instances', { interval: qr ? 4000 : 0 })
+  const { data, refetch } = useApi<{ active: string; backup?: string; instances: Instance[] }>('/api/settings/whatsapp/instances', { interval: qr ? 4000 : 0 })
   const [busy, setBusy] = useState('')
   const [name, setName] = useState('')
 
@@ -29,7 +29,7 @@ export function WhatsAppPane() {
     }
   }, [data, qr, toast])
 
-  async function act(inst: string, kind: 'connect' | 'use' | 'restart' | 'logout' | 'delete' | 'create') {
+  async function act(inst: string, kind: 'connect' | 'use' | 'backup' | 'unbackup' | 'restart' | 'logout' | 'delete' | 'create') {
     if (kind === 'delete' && !confirm(`Delete ${inst}? Its WhatsApp session is removed from Evolution.`)) return
     if (kind === 'use' && !confirm(`Send and read WhatsApp through ${inst} from now on?`)) return
     if (kind === 'logout' && !confirm(`Disconnect ${inst}? You will need to scan a QR code again.`)) return
@@ -38,6 +38,7 @@ export function WhatsAppPane() {
     setBusy(inst + kind)
     const r: Result | null = kind === 'create' ? await post(base, { name: inst })
       : kind === 'delete' ? await api(path, { method: 'DELETE' })
+      : kind === 'unbackup' ? await api('/api/settings/whatsapp/backup', { method: 'DELETE' })
       : await post(path + '/' + kind)
     setBusy('')
     if (!r || !r.success) { toast(r ? failMsg(r, 'That did not work.') : 'That did not work.', 'error'); return refetch() }
@@ -50,7 +51,7 @@ export function WhatsAppPane() {
 
   return (
     <div>
-      <Subhead hint="Every number on your Evolution server. Roadie Crew sends from the one marked in use.">WhatsApp numbers</Subhead>
+      <Subhead hint="Every number on your Evolution server. Roadie Crew sends from the one marked in use; if it disconnects, the backup takes over.">WhatsApp numbers</Subhead>
       {qr && (
         <Card className="mb-4 flex flex-wrap items-center gap-5">
           <img src={qr.src} alt={`QR code for ${qr.name}`} className="h-56 w-56 rounded-md bg-white p-2" />
@@ -79,10 +80,12 @@ export function WhatsAppPane() {
                 {data.instances.map(i => {
                   const st = own(STATUS, i.status) || [i.status, 'idle' as Tone]
                   const active = i.name === data.active
+                  const backup = i.name === data.backup
                   return (
                     <tr key={i.name} className="border-t border-line">
                       <td className="px-4 py-2.5">
                         <b>{i.name}</b>{active && <ToneBadge tone="good" className="ml-2">in use</ToneBadge>}
+                        {backup && <ToneBadge tone="waiting" className="ml-2">backup</ToneBadge>}
                         {i.profile_name && <div className="text-[12px] text-text-3">{i.profile_name}</div>}
                       </td>
                       <td className="px-4 py-2.5 font-mono text-[12px]">{i.number ? '+' + i.number : '—'}</td>
@@ -94,6 +97,8 @@ export function WhatsAppPane() {
                         <div className="flex justify-end gap-2">
                           {i.status !== 'open' && <Button size="sm" variant="primary" busy={busy === i.name + 'connect'} onClick={() => act(i.name, 'connect')}>Connect</Button>}
                           {!active && <Button size="sm" busy={busy === i.name + 'use'} onClick={() => act(i.name, 'use')}>Use</Button>}
+                          {!active && !backup && <Button size="sm" busy={busy === i.name + 'backup'} onClick={() => act(i.name, 'backup')}>Set as backup</Button>}
+                          {backup && <Button size="sm" variant="ghost" busy={busy === i.name + 'unbackup'} onClick={() => act(i.name, 'unbackup')}>Remove backup</Button>}
                           <Button size="sm" busy={busy === i.name + 'restart'} onClick={() => act(i.name, 'restart')}>Restart</Button>
                           {i.status === 'open' && <Button size="sm" busy={busy === i.name + 'logout'} onClick={() => act(i.name, 'logout')}>Disconnect</Button>}
                           {!active && <Button size="sm" variant="ghost" busy={busy === i.name + 'delete'} onClick={() => act(i.name, 'delete')}>Delete</Button>}

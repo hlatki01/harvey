@@ -105,6 +105,9 @@ class WhatsAppSender:
                 f"WhatsApp: {stale} message(s) were interrupted mid-send and won't be "
                 "retried. Check the phone; they're under Didn't send.")
         self.skills = self.brain.load_skills_for_agent("whatsapp") + await self.state.lessons_block()
+        if isinstance(self.client, EvolutionClient) and self.client.backup:
+            if await self.client.connection_state(self.client.instance) == "close":
+                await self.failover("the number in use is disconnected")
         try:
             await self._stage()
             await self._campaigns()
@@ -240,8 +243,10 @@ class WhatsAppSender:
                      "never ask what they do or what they work with.")
             kind = (f"You may say you work with businesses like theirs ({demo.label}). "
                     "Never mention a city or region.")
-            demo_rule = (f"\n- We already have a ready example site for {demo.label}: say so in a few words "
-                         f"and write {DEMO_TOKEN} where its link goes (never a URL yourself); it is the only link allowed.")
+            # No link to a stranger: a link from an unknown number reads as spam and gets
+            # reported. The question offers the example; the handler's send_demo sends it on a yes.
+            demo_rule = (f"\n- We already have a ready example site for {demo.label}: make your yes/no "
+                         "question offer to send it. Never write the link or any URL.")
         else:
             about = "Mention one observed fact if there is one, otherwise ask what they do."
             kind = ("Never mention a city or region, and never say what kind of business they are "
@@ -279,10 +284,7 @@ Write ONLY the message text."""
         text = text.strip().strip('"')
         if text.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,")):
             return ""
-        if demo:
-            # The link is the code's, never the model's: where it asked, else at the end.
-            text = (text.replace(DEMO_TOKEN, demo.url, 1) if DEMO_TOKEN in text
-                    else f"{text}\n{demo.url}").replace(DEMO_TOKEN, "").strip()
+        text = text.replace(DEMO_TOKEN, "").strip()
         return f"{text}\n\n{self.cfg.opt_out_line}".strip()
 
     # ── campaigns ────────────────────────────────────────────────────
@@ -340,7 +342,7 @@ Write ONLY the message text."""
             base = datetime.now(timezone.utc).replace(tzinfo=None)
         status = "pending_review" if self.cfg.require_approval else "approved"
         days = 0
-        for step in campaign.sequence[1:]:
+        for step in campaign.sequence[1:1 + self.cfg.max_follow_ups]:
             days += max(0, step.delay_days)
             body = step.body.replace("{{company}}", prospect.company).replace(
                 "{{ company }}", prospect.company).strip()
@@ -395,6 +397,9 @@ Return ONLY a JSON array:
                 return "cancelled", f"prospect status '{prospect.status}'"
             if item["step"] == 1 and prospect.status == "contacted":
                 return "cancelled", "already contacted"
+            # Also catches follow-ups queued before the limit was lowered.
+            if item["step"] > 1 + self.cfg.max_follow_ups:
+                return "cancelled", "follow-up limit (channels.whatsapp.max_follow_ups)"
         if item["kind"] == "sequence" and item["step"] == 1:
             # It may have been approved a while ago: look again before saying "no site".
             site = await find_own_site(prospect.company)
@@ -475,6 +480,8 @@ Return ONLY a JSON array:
 
             try:
                 result = await self.client.send_text(item["to_email"], item["body"])
+                if not result.ok and result.retry and await self.failover(result.error):
+                    result = await self.client.send_text(item["to_email"], item["body"])
             except Exception as e:
                 # It may have gone out before the error: never retry it.
                 await self.state.update_outbox_item(
@@ -513,6 +520,28 @@ Return ONLY a JSON array:
             logger.info(f"WhatsApp: sent {item['kind']} to {item['to_email']}.")
             if self.send_pacing and not replies_only and sent < budget:
                 await asyncio.sleep(random.uniform(*SEND_JITTER_SECONDS))
+
+    async def failover(self, reason: str) -> bool:
+        """Swap to the backup number when it is connected; the old one becomes
+        the backup. False when there is no connected backup to swap to."""
+        from harvey import notify
+        from harvey.integrations.evolution import BACKUP_SETTING, INSTANCE_SETTING
+        if not isinstance(self.client, EvolutionClient):
+            return False
+        old, backup = self.client.instance, self.client.backup
+        # An unreachable server ("") is not a lost number: swapping can't help.
+        if not backup or await self.client.connection_state(backup) != "open":
+            return False
+        await self.state.set_setting(INSTANCE_SETTING, backup)
+        await self.state.set_setting(BACKUP_SETTING, old)
+        logger.warning(f"WhatsApp: {old} is down ({reason[:120]}); switched to the backup {backup}.")
+        await self.state.log_action(action_type="whatsapp_failover", agent="whatsapp",
+                                    details={"from": old, "to": backup, "reason": reason[:300]})
+        await notify.push(self.state, self.config, "system",
+                          f"failover:{old}:{backup}:{datetime.now():%Y-%m-%d %H}",
+                          f"Roadie Crew: WhatsApp {old} disconnected; now sending from the backup {backup}. "
+                          f"Reconnect {old} under Settings → WhatsApp.", self.client)
+        return True
 
     async def _record_reply_in_thread(self, item: dict):
         """A sent reply belongs in its conversation thread."""

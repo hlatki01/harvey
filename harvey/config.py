@@ -254,6 +254,8 @@ class WhatsAppChannelConfig(BaseModel):
     enabled: bool = False
     max_daily_sends: int = 20          # opening messages and replies together
     max_new_per_cycle: int = 5         # new conversations drafted per heartbeat
+    # Messages to someone who never answered are what get a number reported and banned.
+    max_follow_ups: int = 0
     require_approval: bool = True
     # Answers to people who wrote first go out without review while opening
     # messages (the risky ones, to strangers) still wait for approval.

@@ -22,6 +22,8 @@ logger = logging.getLogger("harvey.evolution")
 TIMEOUT = 30
 # settings-table key for the instance picked in the dashboard (prod's .env is read-only)
 INSTANCE_SETTING = "evolution_instance"
+# the number that takes over when the one in use loses its WhatsApp session
+BACKUP_SETTING = "evolution_backup_instance"
 USER_JID_SUFFIX = "@s.whatsapp.net"
 # Typing time shown to the recipient before the text arrives, in ms.
 TYPING_DELAY_MS = 2500
@@ -119,6 +121,15 @@ class EvolutionClient:
             from harvey.state import read_settings
             return read_settings(self._db_file, (INSTANCE_SETTING,)).get(INSTANCE_SETTING) or self._instance
         return self._instance
+
+    @property
+    def backup(self) -> str:
+        """The number set as backup in the dashboard; "" when there is none."""
+        if not self._db_file:
+            return ""
+        from harvey.state import read_settings
+        backup = read_settings(self._db_file, (BACKUP_SETTING,)).get(BACKUP_SETTING) or ""
+        return "" if backup == self.instance else backup
 
     def is_configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.instance)
@@ -362,6 +373,14 @@ class EvolutionClient:
 
     async def delete_instance(self, name: str) -> None:
         await self._call("DELETE", f"instance/delete/{name}")
+
+    async def connection_state(self, name: str) -> str:
+        """open | connecting | close of one instance; "" when it can't be read."""
+        try:
+            data = await self._call("GET", f"instance/connectionState/{name}")
+        except Exception:
+            return ""
+        return ((data or {}).get("instance") or {}).get("state", "")
 
     async def test_connection(self) -> tuple[bool, str]:
         if not self.is_configured():

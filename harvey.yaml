@@ -69,7 +69,8 @@ channels:
     max_daily_messages: 10
   whatsapp:                    # Evolution API (.env: EVOLUTION_*); see README
     enabled: false             # explicit opt-in
-    max_daily_sends: 20        # openings and replies together
+    max_daily_sends: 20        # cold openings and follow-ups; replies never wait; raise slowly on a new number
+    max_follow_ups: 0          # messages to someone who never answered
     max_new_per_cycle: 5
     require_approval: true
     auto_approve_replies: false  # answers to people who wrote first skip review

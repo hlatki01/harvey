@@ -369,13 +369,15 @@ async def test_stage_drafts_one_message_with_the_opt_out_line(state):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("text", ["Oi, aqui é o Luis. Temos um exemplo pronto: {demo_url} Quer ver?",
                                   "Oi, aqui é o Luis. Temos um exemplo pronto. Quer ver?"])
-async def test_the_opening_carries_the_demo_link_the_code_puts_in(state, text):
+async def test_the_opening_offers_the_demo_without_its_link(state, text):
     await _company(state)
     client = FakeEvolution({"5511987654321": "5511987654321"})
     demo = DemoConfig(label="Oficina", url="https://demo-oficina.guilhermeh.me", keywords=["oficina"])
-    await _sender(state, client, StubBrain(text=text), demos=[demo])._stage()
+    brain = StubBrain(text=text)
+    await _sender(state, client, brain, demos=[demo])._stage()
     [item] = await state.get_outbox(channel="whatsapp")
-    assert item["body"].count(demo.url) == 1 and "{demo_url}" not in item["body"]
+    assert demo.url not in item["body"] and "{demo_url}" not in item["body"]
+    assert "Never write the link" in brain.prompts[0][1]
     assert item["body"].endswith(OPT_OUT)
 
 
@@ -489,6 +491,36 @@ async def test_a_send_refused_because_whatsapp_is_disconnected_is_rescheduled_no
 
 
 @pytest.mark.asyncio
+async def test_a_disconnected_number_hands_over_to_its_connected_backup(state):
+    from harvey.integrations.evolution import BACKUP_SETTING
+    await _company(state)
+    client = FakeEvolution({"5511987654321": "5511987654321"})
+    client._db_file = state.db_path
+    states = {"inst": "close", "reserva": "open"}
+
+    async def connection_state(name):
+        return states.get(name, "")
+
+    async def send(number, text):
+        if states[client.instance] != "open":
+            return SendResult(ok=False, error="Evolution API 400: Connection Closed", retry=True)
+        client.sent.append((client.instance, number))
+        return SendResult(ok=True, message_id="WA1")
+    client.connection_state, client.send_text = connection_state, send
+    sender = _sender(state, client, require_approval=False)
+    await sender._stage()
+
+    assert not await sender.failover("down")                 # no backup set yet
+    await state.set_setting(BACKUP_SETTING, "reserva")
+    await sender._drain()
+    assert client.sent == [("reserva", "5511987654321")]     # resent at once from the backup
+    assert (client.instance, client.backup) == ("reserva", "inst")
+    states["reserva"] = "close"
+    assert not await sender.failover("down")                 # both down: stay put
+    assert client.instance == "reserva"
+
+
+@pytest.mark.asyncio
 async def test_evolution_marks_a_closed_connection_as_retryable():
     closed = _client(lambda r: httpx.Response(400, json={"response": {"message": ["Error: Connection Closed"]}}))
     assert (await closed.send_text("5511987654321", "Oi")).retry
@@ -530,7 +562,7 @@ async def test_daily_cap_counts_only_whatsapp(state):
 async def test_an_opening_joins_a_campaign_with_its_follow_ups_staged(state):
     await _company(state)
     client = FakeEvolution({"5511987654321": "5511987654321"})
-    sender = _sender(state, client)
+    sender = _sender(state, client, max_follow_ups=2)
     await sender._stage()
     await sender._campaigns()
     await sender._campaigns()                              # idempotent
@@ -552,7 +584,7 @@ async def test_openings_sent_before_campaigns_are_adopted(state):
     await _company(state, "Um")
     await _company(state, "Dois", phone="(11) 97777-0000")
     client = FakeEvolution({"5511987654321": "5511987654321", "5511977770000": "5511977770000"})
-    sender = _sender(state, client, require_approval=False)
+    sender = _sender(state, client, require_approval=False, max_follow_ups=2)
     await sender._stage()
     await sender._drain()                                   # the old way: sent, no campaign
     first, second = await state.get_outbox(channel="whatsapp")
@@ -573,7 +605,7 @@ async def test_openings_sent_before_campaigns_are_adopted(state):
 async def test_a_follow_up_waits_for_the_opening_and_its_gap(state):
     await _company(state)
     client = FakeEvolution({"5511987654321": "5511987654321"})
-    sender = _sender(state, client, require_approval=False)
+    sender = _sender(state, client, require_approval=False, max_follow_ups=2)
     await sender._stage()
     await sender._campaigns()
     rows = sorted(await state.get_outbox(channel="whatsapp"), key=lambda i: i["step"])
@@ -590,6 +622,31 @@ async def test_a_follow_up_waits_for_the_opening_and_its_gap(state):
     await state.update_outbox_item(rows[1]["id"], send_at="2000-01-01T00:00:00")
     await sender._drain()
     assert len(client.sent) == 2 and "Oficina do Zé" in client.sent[1][1]
+
+
+
+@pytest.mark.asyncio
+async def test_no_follow_ups_by_default_and_queued_ones_are_cancelled(state):
+    await _company(state)
+    client = FakeEvolution({"5511987654321": "5511987654321"})
+    await _sender(state, client, require_approval=False, max_follow_ups=2)._stage()
+    await _sender(state, client, require_approval=False, max_follow_ups=2)._campaigns()
+    sender = _sender(state, client, require_approval=False)   # the limit drops to 0
+    await sender._drain()
+    rows = sorted(await state.get_outbox(channel="whatsapp"), key=lambda i: i["step"])
+    for r in rows[1:]:
+        await state.update_outbox_item(r["id"], send_at="2000-01-01T00:00:00")
+    await state.update_outbox_item(rows[0]["id"], sent_at="2000-01-01T00:00:00")
+    await sender._drain()
+    await sender._drain()                                   # step 3 waits behind step 2
+    assert len(client.sent) == 1
+    assert [(await state.get_outbox_item(r["id"]))["status"] for r in rows[1:]] == ["cancelled"] * 2
+
+    await _company(state, "Dois", phone="(11) 97777-0000")
+    client.existing["5511977770000"] = "5511977770000"
+    await sender._stage()
+    await sender._campaigns()
+    assert [r["step"] for r in await state.get_outbox(channel="whatsapp") if r["to_email"] == "5511977770000"] == [1]
 
 
 # ── reading replies ──
@@ -887,7 +944,7 @@ def test_campaign_page_shows_a_persons_messages_both_ways_and_timeline(desk):
         await state.init_db()
         await _company(state)
         client = FakeEvolution({"5511987654321": "5511987654321"})
-        sender = _sender(state, client, require_approval=False)
+        sender = _sender(state, client, require_approval=False, max_follow_ups=2)
         await sender._stage()
         await sender._drain()
         await sender._campaigns()

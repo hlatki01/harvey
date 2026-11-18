@@ -817,7 +817,7 @@ async def whatsapp_instances():
         instances = await client.list_instances()
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)[:300]}, status_code=502)
-    return {"success": True, "active": active, "instances": instances}
+    return {"success": True, "active": active, "backup": client.backup, "instances": instances}
 
 
 @app.post("/api/settings/whatsapp/instances")
@@ -838,11 +838,44 @@ async def whatsapp_connect_instance(name: str):
 @app.post("/api/settings/whatsapp/instances/{name}/use")
 async def whatsapp_use_instance(name: str):
     """Send and read WhatsApp through this number from now on."""
+    from harvey.config import load_env
+    from harvey.integrations.evolution import BACKUP_SETTING
+    from harvey.state import read_settings
     if not _INSTANCE_RE.fullmatch(name):
         return JSONResponse({"success": False, "message": "Invalid instance name."}, status_code=400)
+    if read_settings(DB_PATH, (BACKUP_SETTING,)).get(BACKUP_SETTING) == name:
+        active = _active_instance(getattr(load_env(), "evolution_instance", ""))
+        if active:
+            await _state().set_setting(BACKUP_SETTING, active)   # the two swap places
     await _set_active_instance(name)
     _wa_link["at"] = 0.0   # re-check the link for the new number
     return {"success": True, "message": f"Roadie Crew now uses {name}."}
+
+
+@app.post("/api/settings/whatsapp/instances/{name}/backup")
+async def whatsapp_backup_instance(name: str):
+    """Take over from the number in use whenever that one disconnects."""
+    from harvey.integrations.evolution import BACKUP_SETTING
+    if not _INSTANCE_RE.fullmatch(name):
+        return JSONResponse({"success": False, "message": "Invalid instance name."}, status_code=400)
+    _, active, err = _evolution()
+    if err:
+        return err
+    if name == active:
+        return JSONResponse({"success": False, "message": "That number is the one in use."}, status_code=409)
+    state = _state()
+    await state.init_db()
+    await state.set_setting(BACKUP_SETTING, name)
+    return {"success": True, "message": f"{name} takes over if {active} disconnects."}
+
+
+@app.delete("/api/settings/whatsapp/backup")
+async def whatsapp_clear_backup():
+    from harvey.integrations.evolution import BACKUP_SETTING
+    state = _state()
+    await state.init_db()
+    await state.set_setting(BACKUP_SETTING, "")
+    return {"success": True, "message": "No backup number."}
 
 
 @app.post("/api/settings/whatsapp/instances/{name}/restart")
@@ -857,11 +890,15 @@ async def whatsapp_logout_instance(name: str):
 
 @app.delete("/api/settings/whatsapp/instances/{name}")
 async def whatsapp_delete_instance(name: str):
-    _, active, err = _evolution()
+    from harvey.integrations.evolution import BACKUP_SETTING
+    client, active, err = _evolution()
     if not err and name == active:
         return JSONResponse({"success": False, "message": "Roadie Crew sends from this instance. "
                              "Point Integrations at another one before deleting it."}, status_code=409)
-    return await _instance_call(name, lambda c, n: c.delete_instance(n), "Deleted.")
+    result = await _instance_call(name, lambda c, n: c.delete_instance(n), "Deleted.")
+    if not err and isinstance(result, dict) and client.backup == name:
+        await _state().set_setting(BACKUP_SETTING, "")
+    return result
 
 
 @app.post("/api/settings/test-instagram")

@@ -199,3 +199,15 @@ def test_whatsapp_use_instance_switches_the_client_and_rejects_bad_names(owner):
     assert owner.post("/api/settings/env", json={"EVOLUTION_INSTANCE": "a/b"}).status_code == 400
     owner.post("/api/settings/env", json={"EVOLUTION_INSTANCE": ""})   # empty: back to the env's
     assert client.instance == "from-env"
+
+
+def test_using_the_backup_number_swaps_it_with_the_one_in_use(owner):
+    from harvey.integrations.evolution import BACKUP_SETTING, EvolutionClient
+    owner.post("/api/settings/whatsapp/instances/loja1/use")
+    asyncio.run(dash._state().set_setting(BACKUP_SETTING, "loja2"))
+    client = EvolutionClient("http://evo.test", "KEY", "from-env", db_file=dash.DB_PATH)
+    assert (client.instance, client.backup) == ("loja1", "loja2")
+    assert owner.post("/api/settings/whatsapp/instances/loja2/use").json()["success"]
+    assert (client.instance, client.backup) == ("loja2", "loja1")
+    assert owner.delete("/api/settings/whatsapp/backup").json()["success"]
+    assert client.backup == ""
